@@ -9,22 +9,23 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "flowbite": "^3.1.2",
-    "minecraft-protocol": "^1.57.0",
-    "mineflayer": "^4.29.0",
-    "myncraftjs": "^0.0.5",
-    "pinia": "^3.0.3",
-    "pinia-plugin-persistedstate": "^4.3.0",
+    "@lucide/vue": "^1.73.0",
+    "@tailwindcss/vite": "^4.1.18",
+    "flowbite": "^4.0.1",
+    "mineflayer": "^4.33.0",
+    "pinia": "^3.0.4",
+    "tailwindcss": "^4.1.18",
     "vue": "^3.4.21",
-    "vue-router": "^4.5.1"
+    "vue-router": "^4.6.4"
+  },
+  "author": {
+    "email": "senesatka@gmail.com",
+    "name": "SeneSatka"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.0.4",
-    "autoprefixer": "^10.4.21",
     "electron": "^30.0.1",
     "electron-builder": "^24.13.3",
-    "postcss": "^8.5.6",
-    "tailwindcss": "^3.4.17",
     "typescript": "^5.2.2",
     "vite": "^5.1.6",
     "vite-plugin-electron": "^0.28.6",

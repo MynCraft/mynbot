@@ -1,46 +1,25 @@
 <script setup lang="ts">
-import { useBotStore } from "../../store/botStore";
-const props = defineProps<{
-  username: string;
-  isOpen: boolean;
-  trigError?: (message: string) => void;
-}>();
-const botStore = useBotStore();
-const deleteBot = () => {
-  if (props.isOpen) {
-    props.trigError?.("Bot is currently open, close it first!");
-  } else botStore.deleteBot(props.username);
-};
-
-const openBotWindow = () => {
-  if (props.isOpen) {
-    props.trigError?.("Bot already open!");
-  } else window.electronAPI.openBotWindow(props.username);
-};
+import AppIcon from '../ui/AppIcon.vue';
+import { ref } from 'vue';
+import { useBotStore } from '../../store/botStore';
+import { useI18n } from '../../i18n';
+const api = window.electronAPI;
+const props = defineProps<{ username: string; isOpen: boolean; trigError?: (message: string) => void }>();
+const store = useBotStore();
+const { L } = useI18n();
+const busy = ref(false);
+async function act(action: () => Promise<void>) { if (busy.value) return; busy.value = true; try { await action(); } catch (error) { props.trigError?.(String(error)); } finally { busy.value = false; } }
 </script>
 <template>
-  <div class="flex items-center justify-between w-full gap-1">
-    <button
-      @click="openBotWindow"
-      class="text-white bg-neutral-500 bg-opacity-20 backdrop-blur-sm py-1 px-2 w-full rounded-lg flex items-center gap-2 cursor-pointer hover:bg-opacity-30 transition duration-200"
-    >
-      <span>{{ username }}</span>
+  <div class="bot-item" :class="{ 'is-open': isOpen }">
+    <button class="bot-open" :disabled="busy" @click="act(() => api.openBotWindow(username))">
+      <span class="bot-avatar" aria-hidden="true">{{ username.slice(0, 2).toUpperCase() }}</span>
+      <span class="bot-identity">
+        <strong>{{ username }}</strong>
+        <small>{{ isOpen ? L('Panele dön', 'Return to panel') : L('Yönetim panelini aç', 'Open control panel') }}</small>
+      </span>
     </button>
-    <div
-      class="flex items-center gap-2 bg-neutral-500 bg-opacity-20 backdrop-blur-sm py-1 px-2 rounded-lg"
-    >
-      <i
-        class="fa-regular fa-circle-dot text-sm"
-        :class="{ 'text-green-500': isOpen, 'text-neutral-400': !isOpen }"
-      ></i>
-
-      <button
-        @click="deleteBot"
-        class="text-red-600 hover:text-red-800 transition duration-200"
-      >
-        <i class="fa-solid fa-trash-can text-red-600 text-sm"></i>
-      </button>
-    </div>
+    <button class="delete-bot" :disabled="isOpen || busy" :aria-label="L(`${username} botunu sil`, `Delete bot ${username}`)" :title="isOpen ? L('Silmek için önce paneli kapat', 'Close panel first to delete') : L('Botu sil', 'Delete bot')" @click="act(() => store.deleteBot(username))"><AppIcon name="Trash2" /></button>
+    <span class="dot bot-indicator" :class="{ active: isOpen }" role="img" :aria-label="isOpen ? L('Aktif', 'Active') : L('Kapalı', 'Closed')" :title="isOpen ? L('Panel açık', 'Panel open') : L('Panel kapalı', 'Panel closed')"></span>
   </div>
 </template>
-<style scoped></style>

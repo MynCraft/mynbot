@@ -23,7 +23,10 @@ dist-ssr
 *.sln
 *.sw?
 
-
-
-dist-electron
-package-lock.json
+# Generated desktop bundles and local secrets
+dist-electron/
+release/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example

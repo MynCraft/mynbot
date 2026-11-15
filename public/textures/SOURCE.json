@@ -1,0 +1,9 @@
+{
+  "version": "1.21.1",
+  "source": "Official Minecraft Java client",
+  "manifest": "https://piston-meta.mojang.com/v1/packages/9aa86ea608c3ec777dcdc09e6c5a06c85b53599e/1.21.1.json",
+  "client": "https://piston-data.mojang.com/v1/objects/30c73b1c5da787909b2f73340419fdf13b9def88/client.jar",
+  "sha1": "30c73b1c5da787909b2f73340419fdf13b9def88",
+  "copyright": "Minecraft game assets: Mojang / Microsoft. Separate from application source-code license.",
+  "textures": 1617
+}
