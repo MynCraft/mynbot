@@ -286,6 +286,7 @@ export interface BotData {
   pose?: BotPose;
   world?: WorldSnapshot;
   openWindow?: OpenWindowInfo | null;
+  lastError?: string;
 }
 
 export interface Snapshot {

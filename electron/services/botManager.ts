@@ -53,6 +53,7 @@ export class BotManager {
     data.world = undefined;
     data.openWindow = null;
     data.automation = undefined;
+    data.lastError = undefined;
   }
 
   private scheduleReconnect(username: string) {
@@ -155,6 +156,7 @@ export class BotManager {
           this.clearConnectTimer(msg.username);
           this.reconnectAttempts.delete(msg.username);
           this.clearReconnect(msg.username);
+          data.lastError = undefined;
         } else if (msg.state === 'disconnected' || msg.state === 'error') {
           this.clearConnectTimer(msg.username);
           this.clearBotData(msg.username);
@@ -184,7 +186,9 @@ export class BotManager {
         this.clearReconnect(msg.username);
         this.pushLog(msg.username, `Acil panik çıkışı (${msg.reason || 'Tetiklendi'}): Otomatik yeniden bağlanma durduruldu.`);
       } else if (msg.type === 'operation-error') {
-        this.pushLog(msg.username, msg.message || 'İşlem başarısız');
+        const errText = msg.message || 'İşlem başarısız';
+        this.pushLog(msg.username, errText);
+        data.lastError = errText;
         this.statuses[msg.username] = { ...this.statuses[msg.username], message: msg.message };
       }
       this.notify();
@@ -259,6 +263,7 @@ export class BotManager {
   chat(username: string, message: string) {
     if (this.statuses[username]?.state !== 'connected') throw new Error('Bot bağlı değil.');
     if (typeof message !== 'string' || !message.trim() || message.length > 256) throw new Error('Mesaj 1–256 karakter olmalı.');
+    this.entry(username).lastError = undefined;
     this.send({ action: 'chat', username, message: message.trim() });
   }
 

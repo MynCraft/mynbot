@@ -327,7 +327,12 @@ function logTone(line: string): 'log-error' | 'log-warn' | 'log-ok' | '' {
     <header class="titlebar">
       <span class="wordmark"><span class="brand-mark">M</span> myncraft</span>
       <span class="title-caption">{{ L('BOT KONTROL PANELİ', 'BOT CONTROL PANEL') }}</span>
-      <button class="window-close" :aria-label="L('Pencereyi kapat', 'Close window')" @click="api.closeWindow()"><AppIcon name="X" :size="18" /></button>
+      <button
+        class="window-close"
+        :aria-label="L('Pencereyi kapat (bot bağlantısını keser)', 'Close window (disconnects bot)')"
+        :title="L('Pencereyi kapat (bot bağlantısını keser)', 'Close window (disconnects bot)')"
+        @click="api.closeWindow()"
+      ><AppIcon name="X" :size="18" /></button>
     </header>
 
     <div class="panel-layout">
@@ -586,6 +591,7 @@ function logTone(line: string): 'log-error' | 'log-warn' | 'log-ok' | '' {
               {{ L('Gönder', 'Send') }} <AppIcon name="ArrowUpRight" />
             </button>
           </form>
+          <p v-if="data.lastError" class="log-error" style="margin-top: 6px; font-size: 12px;">{{ data.lastError }}</p>
         </div>
 
         <!-- Tab 3: Dünya & Envanter / World & Inventory -->

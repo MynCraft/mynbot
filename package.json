@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc && vite build && electron-builder",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "for t in tests/*.test.cjs; do node \"$t\" || exit 1; done"
   },
   "dependencies": {
     "@lucide/vue": "^1.73.0",
