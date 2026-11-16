@@ -1220,8 +1220,12 @@ process.on('message', payload => {
         triggerJoinChat(username, instance);
         loadExternalPlugins(username, instance);
       };
-      const registerResourcePack = (url, hash, uuid) => {
+      const seenResourcePacks = new Set();
+      const registerResourcePack = (url, uuid) => {
         if (!current()) return;
+        const key = uuid || url;
+        if (key && seenResourcePacks.has(key)) return;
+        if (key) seenResourcePacks.add(key);
         if (url && typeof url === 'string') {
           send({ type: 'resource-pack', username, url });
           logLine(username, `Resource pack bulundu: ${url}`);
@@ -1230,38 +1234,10 @@ process.on('message', payload => {
           if (typeof instance.acceptResourcePack === 'function') {
             instance.acceptResourcePack();
           }
-        } catch { /* ignore */ }
-        if (instance._client && typeof instance._client.write === 'function') {
-          try {
-            if (uuid) {
-              instance._client.write('resource_pack_receive', { uuid, result: 3 });
-              instance._client.write('resource_pack_receive', { uuid, result: 0 });
-            } else {
-              instance._client.write('resource_pack_receive', { result: 3 });
-              instance._client.write('resource_pack_receive', { result: 0 });
-            }
-          } catch { /* ignore */ }
+        } catch (error) {
+          logLine(username, `Resource pack kabul hatası: ${String(error?.message || error)}`);
         }
       };
-
-      let clientPackListenersAttached = false;
-      const attachClientPackListeners = () => {
-        if (clientPackListenersAttached || !instance._client) return;
-        clientPackListenersAttached = true;
-        const onPackPacket = packet => {
-          if (!current()) return;
-          registerResourcePack(packet?.url, packet?.hash, packet?.uuid);
-        };
-        instance._client.on('resource_pack_send', onPackPacket);
-        instance._client.on('add_resource_pack', onPackPacket);
-      };
-
-      if (instance._client) {
-        attachClientPackListeners();
-      }
-      instance.once('inject_allowed', () => {
-        attachClientPackListeners();
-      });
 
       instance.once('login', () => {
         if (!current()) return;
@@ -1413,10 +1389,10 @@ process.on('message', payload => {
       });
       instance.on('resourcePack', (arg1, arg2, arg3) => {
         if (!current()) return;
-        const url = [arg1, arg2, arg3].find(v => typeof v === 'string' && /^https?:\/\//i.test(v));
-        const uuid = [arg1, arg2, arg3].find(v => typeof v === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}/i.test(v));
-        const hash = [arg1, arg2, arg3].find(v => typeof v === 'string' && /^[0-9a-f]{40}$/i.test(v));
-        registerResourcePack(url, hash, uuid);
+        const args = [arg1, arg2, arg3].filter(v => v != null);
+        const url = args.find(v => typeof v === 'string' && /^https?:\/\//i.test(v));
+        const uuid = args.map(v => String(v)).find(s => /^[0-9a-f]{8}-[0-9a-f]{4}/i.test(s));
+        registerResourcePack(url, uuid);
       });
       instance.on('heldItemChanged', () => inventory(username, instance));
       instance.on('error', error => {
@@ -1438,6 +1414,7 @@ process.on('message', payload => {
       });
       instance.once('end', reason => {
         if (!current()) return;
+        seenResourcePacks.clear();
         cleanupPlugins(username, instance);
         bots.delete(username);
         if (!failureReported) status(username, failure ? 'error' : 'disconnected', failure || (reason ? formatReason(reason) : undefined));
