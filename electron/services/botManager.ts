@@ -11,6 +11,7 @@ export class BotManager {
   private configs = new Map<string, BotConfig>();
   private manualDisconnects = new Set<string>();
   private reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private connectTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private reconnectAttempts = new Map<string, number>();
 
   readonly statuses: Record<string, BotStatus> = {};
@@ -33,6 +34,25 @@ export class BotManager {
       clearTimeout(timer);
       this.reconnectTimers.delete(username);
     }
+  }
+
+  private clearConnectTimer(username: string) {
+    const timer = this.connectTimers.get(username);
+    if (timer) {
+      clearTimeout(timer);
+      this.connectTimers.delete(username);
+    }
+  }
+
+  private clearBotData(username: string) {
+    const data = this.entry(username);
+    data.inventory = [];
+    data.cursor = null;
+    data.slotCount = 0;
+    data.pose = undefined;
+    data.world = undefined;
+    data.openWindow = null;
+    data.automation = undefined;
   }
 
   private scheduleReconnect(username: string) {
@@ -130,16 +150,12 @@ export class BotManager {
         this.statuses[msg.username] = { state: msg.state, message: msg.message };
         this.pushLog(msg.username, msg.message || ({ connecting: 'Bağlanıyor', connected: 'Bağlantı kuruldu', disconnected: 'Bağlantı kapatıldı', error: 'Bağlantı hatası' } as const)[msg.state]);
         if (msg.state === 'connected') {
+          this.clearConnectTimer(msg.username);
           this.reconnectAttempts.delete(msg.username);
           this.clearReconnect(msg.username);
         } else if (msg.state === 'disconnected' || msg.state === 'error') {
-          data.inventory = [];
-          data.cursor = null;
-          data.slotCount = 0;
-          data.pose = undefined;
-          data.world = undefined;
-          data.openWindow = null;
-          data.automation = undefined;
+          this.clearConnectTimer(msg.username);
+          this.clearBotData(msg.username);
           this.scheduleReconnect(msg.username);
         }
       } else if (msg.type === 'automation' && this.statuses[msg.username]?.state === 'connected') {
@@ -177,16 +193,11 @@ export class BotManager {
       for (const request of this.pending.values()) { clearTimeout(request.timer); request.reject(new Error('Bot işlemi durdu.')); }
       this.pending.clear();
       for (const [username, status] of Object.entries(this.statuses)) {
+        this.clearConnectTimer(username);
         if (status.state === 'connecting' || status.state === 'connected') {
           status.state = 'error';
           status.message = error?.message || stderr || 'Bot işlemi durdu.';
-          const d = this.entry(username);
-          d.inventory = [];
-          d.cursor = null;
-          d.slotCount = 0;
-          d.pose = undefined;
-          d.world = undefined;
-          d.openWindow = null;
+          this.clearBotData(username);
           this.scheduleReconnect(username);
         }
       }
@@ -200,6 +211,7 @@ export class BotManager {
     if (['connecting', 'connected'].includes(this.statuses[bot.username]?.state)) throw new Error('Bot zaten bağlanıyor veya bağlı.');
     this.manualDisconnects.delete(bot.username);
     this.clearReconnect(bot.username);
+    this.clearConnectTimer(bot.username);
     if (!keepAttemptCount) this.reconnectAttempts.delete(bot.username);
     this.configs.set(bot.username, bot);
     this.start();
@@ -207,6 +219,19 @@ export class BotManager {
     this.notify();
     const { plugins, ...connection } = bot;
     this.send({ action: 'connect', bot: connection, plugins, pluginsDir: this.pluginsDir });
+    const timer = setTimeout(() => {
+      this.connectTimers.delete(bot.username);
+      if (this.statuses[bot.username]?.state !== 'connecting') return;
+      this.statuses[bot.username] = { state: 'error', message: 'Bağlantı zaman aşımı' };
+      this.pushLog(bot.username, 'Bağlantı zaman aşımı (30 sn).');
+      this.clearBotData(bot.username);
+      if (this.worker?.connected) {
+        try { this.send({ action: 'disconnect', username: bot.username }); } catch { /* ignore */ }
+      }
+      this.scheduleReconnect(bot.username);
+      this.notify();
+    }, 30_000);
+    this.connectTimers.set(bot.username, timer);
   }
 
   updatePlugins(username: string, plugins: BotPluginSettings) {
@@ -221,15 +246,10 @@ export class BotManager {
   disconnect(username: string) {
     this.manualDisconnects.add(username);
     this.clearReconnect(username);
+    this.clearConnectTimer(username);
     this.reconnectAttempts.delete(username);
     if (this.worker?.connected) this.send({ action: 'disconnect', username });
-    const d = this.entry(username);
-    d.inventory = [];
-    d.cursor = null;
-    d.slotCount = 0;
-    d.pose = undefined;
-    d.world = undefined;
-    d.openWindow = null;
+    this.clearBotData(username);
     this.statuses[username] = { state: 'disconnected' };
     this.notify();
   }

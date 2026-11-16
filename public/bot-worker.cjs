@@ -1132,10 +1132,39 @@ function cleanupPlugins(username, bot) {
   }
 }
 
-process.on('message', ({ action, bot, username, message, slot, requestId, click, plugins, pluginsDir, pos, name, control, state, yaw, pitch, durationMs, entityId, enabled }) => {
+function broadcastWorkerError(prefix, error) {
+  const detail = error?.stack || error?.message || String(error);
+  const text = `${prefix}: ${detail}`;
+  for (const uname of bots.keys()) {
+    logLine(uname, text);
+  }
+}
+
+process.on('uncaughtException', error => {
+  broadcastWorkerError('Worker yakalanmamış hata', error);
+});
+
+process.on('unhandledRejection', error => {
+  broadcastWorkerError('Worker işlenmemiş promise hatası', error);
+});
+
+process.on('message', payload => {
+  if (!payload || typeof payload !== 'object') return;
+  let { action, bot, username, message, slot, requestId, click, plugins, pluginsDir, pos, name, control, state, yaw, pitch, durationMs, entityId, enabled } = payload;
+  try {
   if (action === 'connect') {
+    if (!bot || typeof bot.username !== 'string' || !bot.username.trim()) {
+      if (username) status(username, 'error', 'Geçersiz bot yapılandırması.');
+      return;
+    }
     username = bot.username;
-    if (bots.has(username)) return;
+    if (bots.has(username)) {
+      const oldInstance = bots.get(username);
+      logLine(username, 'Önceki bot örneği temizlenip yeniden bağlanılıyor.');
+      cleanupPlugins(username, oldInstance);
+      bots.delete(username);
+      try { oldInstance?.quit?.(); } catch { /* ignore */ }
+    }
     const pluginState = getState(username);
     pluginState.plugins = plugins || null;
     pluginState.pluginsDir = pluginsDir || '';
@@ -1143,6 +1172,8 @@ process.on('message', ({ action, bot, username, message, slot, requestId, click,
     try {
       let failure;
       let failureReported = false;
+      let loggedIn = false;
+      let spawnedOnce = false;
       let pluginsInitialized = false;
       let inventoryBound = false;
       const instance = mineflayer.createBot({ ...bot, auth: 'offline' });
@@ -1206,9 +1237,10 @@ process.on('message', ({ action, bot, username, message, slot, requestId, click,
 
       instance.once('login', () => {
         if (!current()) return;
+        loggedIn = true;
         instance.physicsEnabled = true;
         ensurePhysicsAndFallbackAir(instance);
-        status(username, 'connected');
+        status(username, 'connecting', 'Dünya yükleniyor...');
         bindInventory();
         initPluginsOnce();
         if (instance._client) {
@@ -1252,7 +1284,12 @@ process.on('message', ({ action, bot, username, message, slot, requestId, click,
         clearCursor(instance);
         ensurePhysicsAndFallbackAir(instance);
         instance.physicsEnabled = true;
-        status(username, 'connected');
+        if (!spawnedOnce) {
+          spawnedOnce = true;
+          status(username, 'connected');
+        } else {
+          logLine(username, 'Yeniden doğuldu / boyut değişti.');
+        }
         bindInventory();
         applyAntiAfk(username, instance);
         applyCommandScheduler(username, instance);
@@ -1356,15 +1393,20 @@ process.on('message', ({ action, bot, username, message, slot, requestId, click,
       instance.on('heldItemChanged', () => inventory(username, instance));
       instance.on('error', error => {
         if (!current()) return;
-        failure = error.message;
-        failureReported = true;
-        status(username, 'error', failure);
+        const msg = error?.message || String(error);
+        logLine(username, `Protokol/bağlantı hatası: ${msg}`);
+        if (!loggedIn) {
+          failure = msg;
+          failureReported = true;
+          status(username, 'error', failure);
+        } else {
+          send({ type: 'operation-error', username, message: msg });
+        }
       });
       instance.on('kicked', reason => {
         if (!current()) return;
         failure = `Sunucudan atıldı: ${formatReason(reason)}`;
-        failureReported = true;
-        status(username, 'error', failure);
+        logLine(username, failure);
       });
       instance.once('end', reason => {
         if (!current()) return;
@@ -1743,6 +1785,12 @@ process.on('message', ({ action, bot, username, message, slot, requestId, click,
       else { getState(username).automation?.manual(); instance.setQuickBarSlot(slot); inventory(username, instance); }
     } catch (error) {
       send({ type: 'operation-error', username, message: String(error?.message || error) });
+    }
+  }
+  } catch (error) {
+    const target = username || bot?.username;
+    if (target) {
+      logLine(target, `Worker mesaj işleme hatası (${action || '?'}): ${String(error?.message || error)}`);
     }
   }
 });
