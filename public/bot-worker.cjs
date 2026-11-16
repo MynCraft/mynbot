@@ -422,45 +422,10 @@ function clearCursor(instance) {
   if (instance.currentWindow) instance.currentWindow.selectedItem = null;
 }
 
-function ensurePhysicsAndFallbackAir(instance) {
-  if (!instance) return;
-  instance.physicsEnabled = true;
-  if (typeof instance.blockAt === 'function' && !instance.blockAt._mynbotPatched) {
-    const origBlockAt = instance.blockAt.bind(instance);
-    instance._origBlockAt = origBlockAt;
-    const patchedBlockAt = function patchedBlockAt(pos, extraInfos) {
-      const real = origBlockAt ? origBlockAt(pos, extraInfos) : null;
-      if (real) return real;
-      if (!instance.physicsEnabled) return null;
-      const floored = pos && typeof pos.floored === 'function' ? pos.floored() : new Vec3(Math.floor(pos?.x || 0), Math.floor(pos?.y || 0), Math.floor(pos?.z || 0));
-      try {
-        if (!instance._FallbackBlockClass && instance.registry) {
-          instance._FallbackBlockClass = require('prismarine-block')(instance.registry);
-        }
-        if (instance._FallbackBlockClass) {
-          const air = new instance._FallbackBlockClass(0, 0, 0);
-          air.position = floored;
-          air._isFallbackAir = true;
-          return air;
-        }
-      } catch {}
-      return {
-        type: 0,
-        name: 'air',
-        displayName: 'Air',
-        boundingBox: 'empty',
-        shapes: [],
-        metadata: 0,
-        light: 0,
-        skyLight: 15,
-        biome: { id: 1 },
-        position: floored,
-        _isFallbackAir: true,
-      };
-    };
-    patchedBlockAt._mynbotPatched = true;
-    instance.blockAt = patchedBlockAt;
-  }
+function isChunkLoadedAt(bot, pos) {
+  if (!bot || !pos || typeof bot.blockAt !== 'function') return false;
+  const floored = pos.floored ? pos.floored() : new Vec3(Math.floor(pos.x), Math.floor(pos.y), Math.floor(pos.z));
+  return bot.blockAt(floored) !== null;
 }
 
 function serializeWindow(bot, username) {
@@ -534,11 +499,8 @@ function classifyInteractable(name) {
 
 function sendPose(username, bot) {
   if (bots.get(username) !== bot || !bot.entity || !bot.entity.position) return;
-  bot.physicsEnabled = true;
   const pos = bot.entity.position;
-  const flooredPos = pos.floored ? pos.floored() : new Vec3(Math.floor(pos.x), Math.floor(pos.y), Math.floor(pos.z));
-  const b = bot._origBlockAt ? bot._origBlockAt(flooredPos) : (typeof bot.blockAt === 'function' ? bot.blockAt(flooredPos) : null);
-  const chunkLoaded = Boolean(b && !b._isFallbackAir);
+  const chunkLoaded = isChunkLoadedAt(bot, pos);
   send({
     type: 'pose',
     username,
@@ -550,7 +512,7 @@ function sendPose(username, bot) {
       pitch: Number(bot.entity.pitch.toFixed(2)),
       health: Math.round(bot.health ?? 20),
       food: Math.round(bot.food ?? 20),
-      physicsEnabled: true,
+      physicsEnabled: Boolean(bot.physicsEnabled),
       onGround: Boolean(bot.entity.onGround),
       chunkLoaded,
     },
@@ -568,7 +530,7 @@ function sendWorld(username, bot) {
     for (let dy = -2; dy <= 3; dy++) {
       for (let dz = -4; dz <= 4; dz++) {
         const b = bot.blockAt(new Vec3(cx + dx, cy + dy, cz + dz));
-        if (!b || b._isFallbackAir || b.name === 'air' || b.name === 'cave_air' || b.name === 'void_air') continue;
+        if (!b || b.name === 'air' || b.name === 'cave_air' || b.name === 'void_air') continue;
         const blockCenter = new Vec3(cx + dx + 0.5, cy + dy + 0.5, cz + dz + 0.5);
         const distance = Number(pos.distanceTo(blockCenter).toFixed(2));
         const interactable = classifyInteractable(b.name);
@@ -1206,7 +1168,6 @@ process.on('message', payload => {
       let inventoryBound = false;
       const instance = mineflayer.createBot({ ...resolvedBot, auth: 'offline' });
       bots.set(username, instance);
-      ensurePhysicsAndFallbackAir(instance);
       const current = () => bots.get(username) === instance;
       const bindInventory = () => {
         if (inventoryBound || !instance.inventory) return;
@@ -1242,8 +1203,6 @@ process.on('message', payload => {
       instance.once('login', () => {
         if (!current()) return;
         loggedIn = true;
-        instance.physicsEnabled = true;
-        ensurePhysicsAndFallbackAir(instance);
         status(username, 'connecting', 'Dünya yükleniyor...');
         bindInventory();
         initPluginsOnce();
@@ -1280,14 +1239,11 @@ process.on('message', payload => {
       });
       instance.on('forcedMove', () => {
         if (!current()) return;
-        ensurePhysicsAndFallbackAir(instance);
         sendPose(username, instance);
       });
       instance.on('spawn', () => {
         if (!current()) return;
         clearCursor(instance);
-        ensurePhysicsAndFallbackAir(instance);
-        instance.physicsEnabled = true;
         if (!spawnedOnce) {
           spawnedOnce = true;
           status(username, 'connected');
@@ -1516,7 +1472,7 @@ process.on('message', payload => {
       }
       const targetPos = new Vec3(pos.x, pos.y, pos.z);
       const block = typeof instance.blockAt === 'function' ? instance.blockAt(targetPos) : null;
-      if (!block || block._isFallbackAir || block.name === 'air') throw new Error('Blok bulunamadı.');
+      if (!block || block.name === 'air') throw new Error('Blok bulunamadı.');
       const center = new Vec3(pos.x + 0.5, pos.y + 0.5, pos.z + 0.5);
       const distance = instance.entity.position.distanceTo(center);
       if (distance > 5.5) throw new Error('Blok çok uzakta (en fazla 5.5 blok).');
@@ -1650,14 +1606,13 @@ process.on('message', payload => {
     const instance = bots.get(username);
     try {
       if (!instance || !instance.entity) throw new Error('Bot bağlı değil.');
+      if (!isChunkLoadedAt(instance, instance.entity.position)) throw new Error('Dünya henüz yüklenmedi.');
       const manualControls = getState(username).manualControls;
       if (state) manualControls.add(control); else manualControls.delete(control);
       getState(username).automation?.manual();
       const validControls = ['forward', 'back', 'left', 'right', 'jump', 'sneak', 'sprint'];
       if (!validControls.includes(control)) throw new Error('Geçersiz kontrol adı.');
       const dur = Math.max(50, Math.min(1500, Number(durationMs) || 260));
-      instance.physicsEnabled = true;
-      ensurePhysicsAndFallbackAir(instance);
       instance.setControlState(control, true);
 
       if (control === 'forward' && typeof instance.blockAt === 'function') {
@@ -1693,13 +1648,12 @@ process.on('message', payload => {
     const instance = bots.get(username);
     try {
       if (!instance || !instance.entity || !instance.entity.position) throw new Error('Bot bağlı değil.');
+      if (!isChunkLoadedAt(instance, instance.entity.position)) throw new Error('Dünya henüz yüklenmedi.');
       const st = getState(username);
       if (st.moveTimer) {
         clearInterval(st.moveTimer);
         st.moveTimer = null;
       }
-      instance.physicsEnabled = true;
-      ensurePhysicsAndFallbackAir(instance);
 
       const tx = Number(pos?.x) + 0.5;
       const tz = Number(pos?.z) + 0.5;
@@ -1792,9 +1746,7 @@ process.on('message', payload => {
     const instance = bots.get(username);
     try {
       if (!instance) throw new Error('Bot bağlı değil.');
-      // Physics is always 100% enabled - ignore false and enforce true
-      instance.physicsEnabled = true;
-      ensurePhysicsAndFallbackAir(instance);
+      instance.physicsEnabled = enabled !== false;
       sendPose(username, instance);
     } catch (error) {
       send({ type: 'operation-error', username, message: String(error?.message || error) });
