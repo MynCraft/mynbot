@@ -9,22 +9,36 @@ const SAMPLE_PLUGIN = `'use strict';
  * Ornek MynBot / Mineflayer eklentisi.
  * Her eklenti ya dogrudan bir fonksiyon (bot, ctx) => void
  * ya da { name, setup(bot, ctx) } nesnesi disa aktarabilir.
+ *
+ * Not: setup() ilk spawn sonrasinda cagirilir (bot.entity ve envanter hazirdir).
+ * ctx.onParsedChat(parsed => ...): Plugins > Sohbet Kalibratoru uzerinden
+ * desen tanimliysa { type, sender, message, rawLines } nesnesi ile tetiklenir.
+ * Desen tanimlanmamissa parsedChat tetiklenmez; ham metin icin bot.on('messagestr', ...) kullanabilirsiniz.
  */
 module.exports = {
   name: 'Ornek Selamlama',
   setup(bot, ctx) {
     ctx.log('Ornek eklenti yuklendi.');
 
-    const onChat = (username, message) => {
-      if (username === bot.username) return;
-      if (message.trim().toLowerCase() === '!selam') {
-        bot.chat(\`Merhaba \${username}!\`);
+    // Kalibre edilmis sohbet / PM desenleri icin (onerilen):
+    ctx.onParsedChat(parsed => {
+      if (!parsed.sender || parsed.sender === bot.username) return;
+      if (parsed.message.trim().toLowerCase() === '!selam') {
+        bot.chat(\`Merhaba \${parsed.sender}!\`);
+      }
+    });
+
+    // Kalibrasyon yapilmamis sunucularda yedek olarak ham sohbet dinleyicisi:
+    const onMessage = message => {
+      const text = String(message || '').trim();
+      if (text.endsWith('!selam') && !text.includes(bot.username)) {
+        bot.chat('Merhaba!');
       }
     };
 
-    bot.on('chat', onChat);
+    bot.on('messagestr', onMessage);
     return () => {
-      bot.removeListener('chat', onChat);
+      bot.removeListener('messagestr', onMessage);
     };
   },
 };

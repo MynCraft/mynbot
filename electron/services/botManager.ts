@@ -115,7 +115,9 @@ export class BotManager {
   private start() {
     if (this.worker?.connected) return;
     if (!existsSync(this.workerPath)) throw new Error('Bot çalışma dosyası bulunamadı.');
-    const worker = fork(this.workerPath, [], { execPath: this.runtime(), env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined }, silent: true });
+    const appNodeModules = path.resolve(path.dirname(this.workerPath), '..', 'node_modules');
+    const nodePath = process.env.NODE_PATH ? `${appNodeModules}${path.delimiter}${process.env.NODE_PATH}` : appNodeModules;
+    const worker = fork(this.workerPath, [], { execPath: this.runtime(), env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined, NODE_PATH: nodePath }, silent: true });
     this.worker = worker;
     let stderr = '';
     worker.stderr?.on('data', chunk => { stderr = (stderr + String(chunk)).slice(-1200); });

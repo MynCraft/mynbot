@@ -276,18 +276,22 @@ const builtinCards = computed<PluginCardItem[]>(() => [
 ]);
 
 const scriptCards = computed<PluginCardItem[]>(() =>
-  store.pluginScripts.map(script => ({
-    id: `script:${script.filename}`,
-    kind: 'script',
-    defaultIcon: 'Code',
-    title: script.filename,
-    description: L('Yerel Mineflayer (.js / .cjs) eklentisi.', 'Local Mineflayer (.js / .cjs) plugin.'),
-    summary: `${Math.max(1, Math.round(script.size / 1024))} KB`,
-    enabled: draft.value.enabledScripts.includes(script.filename),
-    hasToggle: true,
-    scriptFilename: script.filename,
-    scriptSize: script.size,
-  }))
+  store.pluginScripts.map(script => {
+    const enabled = draft.value.enabledScripts.includes(script.filename);
+    return {
+      id: `script:${script.filename}`,
+      kind: 'script',
+      defaultIcon: 'Code',
+      title: script.filename,
+      description: L('Yerel Mineflayer (.js / .cjs) eklentisi.', 'Local Mineflayer (.js / .cjs) plugin.'),
+      summary: `${Math.max(1, Math.round(script.size / 1024))} KB`,
+      enabled,
+      hasToggle: true,
+      status: automationHint(`script:${script.filename}`, enabled),
+      scriptFilename: script.filename,
+      scriptSize: script.size,
+    };
+  })
 );
 
 const allCards = computed(() => [...builtinCards.value, ...scriptCards.value]);

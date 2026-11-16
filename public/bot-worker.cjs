@@ -1,5 +1,13 @@
 'use strict';
 const path = require('node:path');
+const Module = require('node:module');
+const appRoot = path.resolve(__dirname, '..');
+const appNodeModules = path.join(appRoot, 'node_modules');
+if (!process.env.NODE_PATH || !process.env.NODE_PATH.split(path.delimiter).includes(appNodeModules)) {
+  process.env.NODE_PATH = process.env.NODE_PATH ? `${appNodeModules}${path.delimiter}${process.env.NODE_PATH}` : appNodeModules;
+  if (typeof Module._initPaths === 'function') Module._initPaths();
+}
+const appRequire = Module.createRequire(path.join(appRoot, 'package.json'));
 const mineflayer = require('mineflayer');
 const mc = require('minecraft-protocol');
 const mcData = require('minecraft-data');
@@ -601,6 +609,9 @@ function getState(username) {
       schedulerTimer: null,
       cleanups: [],
       parsedChatListeners: [],
+      scriptCleanups: new Map(),
+      scriptParsedChatListeners: new Map(),
+      loadedScripts: [],
       recentLines: [],
       recentLoginLines: [],
       lastAutoReplyAt: 0,
@@ -1107,8 +1118,29 @@ function scheduleAutoLobby(username, bot) {
   }, delaySec * 1000);
 }
 
+function unloadExternalPlugins(username) {
+  const state = pluginStates.get(username);
+  if (!state) return;
+  for (const [filename, fns] of state.scriptCleanups.entries()) {
+    while (fns.length) {
+      const fn = fns.pop();
+      try { fn(); } catch (error) { logLine(username, `Eklenti temizleme hatası (${filename}): ${String(error)}`); }
+    }
+  }
+  state.scriptCleanups.clear();
+  state.scriptParsedChatListeners.clear();
+  state.loadedScripts = [];
+  if (state.workerStatuses) {
+    for (const key of Object.keys(state.workerStatuses)) {
+      if (key.startsWith('script:')) delete state.workerStatuses[key];
+    }
+    sendCombinedAutomation(username);
+  }
+}
+
 function loadExternalPlugins(username, bot) {
   const state = getState(username);
+  unloadExternalPlugins(username);
   const scripts = Array.isArray(state.plugins?.enabledScripts) ? state.plugins.enabledScripts : [];
   const dir = state.pluginsDir;
   if (!dir || !scripts.length) return;
@@ -1118,6 +1150,10 @@ function loadExternalPlugins(username, bot) {
     if (typeof filename !== 'string' || !PLUGIN_NAME_RE.test(filename) || filename.startsWith('.')) continue;
     const target = path.resolve(resolvedDir, filename);
     if (path.dirname(target) !== resolvedDir) continue;
+    const scriptCleanups = [];
+    const scriptListeners = [];
+    state.scriptCleanups.set(filename, scriptCleanups);
+    state.scriptParsedChatListeners.set(filename, scriptListeners);
     try {
       const resolvedModule = require.resolve(target);
       delete require.cache[resolvedModule];
@@ -1132,15 +1168,34 @@ function loadExternalPlugins(username, bot) {
       if (!entry) throw new Error('Eklenti bir fonksiyon veya setup(bot, ctx) dışa aktarmalı.');
       const ctx = {
         username,
+        bot,
+        require: appRequire,
         log: msg => logLine(username, `[${filename}] ${String(msg)}`),
-        registerCleanup: fn => { if (typeof fn === 'function') state.cleanups.push(fn); },
-        onParsedChat: fn => { if (typeof fn === 'function') state.parsedChatListeners.push(fn); },
+        registerCleanup: fn => { if (typeof fn === 'function') scriptCleanups.push(fn); },
+        onParsedChat: fn => { if (typeof fn === 'function') scriptListeners.push(fn); },
+        onSpawn: fn => {
+          if (typeof fn !== 'function') return;
+          const wrapped = () => {
+            try { fn(); } catch (err) {
+              const errMsg = `Eklenti spawn hatası (${filename}): ${String(err)}`;
+              send({ type: 'operation-error', username, message: errMsg });
+              reportWorkerAutomation(username, `script:${filename}`, 'error', String(err?.message || err));
+            }
+          };
+          bot.on('spawn', wrapped);
+          scriptCleanups.push(() => bot.removeListener('spawn', wrapped));
+          if (bot.entity) wrapped();
+        },
       };
       const maybeCleanup = entry(bot, ctx);
-      if (typeof maybeCleanup === 'function') state.cleanups.push(maybeCleanup);
+      if (typeof maybeCleanup === 'function') scriptCleanups.push(maybeCleanup);
+      state.loadedScripts.push(filename);
       logLine(username, `Eklenti yüklendi: ${filename}`);
+      reportWorkerAutomation(username, `script:${filename}`, 'idle', 'Yüklü');
     } catch (error) {
-      send({ type: 'operation-error', username, message: `Eklenti hatası (${filename}): ${String(error)}` });
+      const errMsg = `Eklenti hatası (${filename}): ${String(error)}`;
+      send({ type: 'operation-error', username, message: errMsg });
+      reportWorkerAutomation(username, `script:${filename}`, 'error', String(error?.message || error));
     }
   }
 }
@@ -1148,6 +1203,7 @@ function loadExternalPlugins(username, bot) {
 function cleanupPlugins(username, bot) {
   const state = pluginStates.get(username);
   if (!state) return;
+  unloadExternalPlugins(username);
   stopAfk(username, bot);
   stopCommandScheduler(username);
   state.automation?.stop();
@@ -1287,7 +1343,6 @@ process.on('message', payload => {
         loggedIn = true;
         status(username, 'connecting', 'Dünya yükleniyor...');
         bindInventory();
-        initPluginsOnce();
         if (instance._client) {
           instance._client.on('set_slot', packet => {
             if (!current()) return;
@@ -1330,6 +1385,7 @@ process.on('message', payload => {
           spawnedOnce = true;
           status(username, 'connected');
           triggerJoinChat(username, instance);
+          initPluginsOnce();
         } else {
           logLine(username, 'Yeniden doğuldu / boyut değişti.');
         }
@@ -1432,6 +1488,14 @@ process.on('message', payload => {
           for (const listener of st.parsedChatListeners) {
             try { listener(parsed); } catch (error) { logLine(username, `Eklenti parsedChat hatası: ${String(error)}`); }
           }
+          for (const [scriptName, listeners] of st.scriptParsedChatListeners.entries()) {
+            for (const listener of listeners) {
+              try { listener(parsed); } catch (error) {
+                logLine(username, `Eklenti parsedChat hatası (${scriptName}): ${String(error)}`);
+                reportWorkerAutomation(username, `script:${scriptName}`, 'error', String(error?.message || error));
+              }
+            }
+          }
           instance.emit('mynbot:chat', parsed);
         }
         handleAutoLogin(username, instance, msg, 'chat');
@@ -1499,6 +1563,7 @@ process.on('message', payload => {
     status(username, 'disconnected');
   } else if (action === 'update-plugins') {
     const state = getState(username);
+    const prevScripts = JSON.stringify(state.loadedScripts || []);
     state.plugins = plugins || null;
     if (pluginsDir) state.pluginsDir = pluginsDir;
     const instance = bots.get(username);
@@ -1512,6 +1577,10 @@ process.on('message', payload => {
         reportWorkerAutomation(username, 'autoLobby', 'idle');
       }
       state.automation?.update(state.plugins);
+      const nextScripts = JSON.stringify(Array.isArray(state.plugins?.enabledScripts) ? state.plugins.enabledScripts : []);
+      if (instance.entity && prevScripts !== nextScripts) {
+        loadExternalPlugins(username, instance);
+      }
     }
   } else if (action === 'inventory-click') {
     const instance = bots.get(username);
