@@ -606,7 +606,9 @@ function getState(username) {
       lastAutoReplyAt: 0,
       lastAutoLoginAt: 0,
       lastAutoAcceptAt: 0,
-      lastSentText: '',
+      recentSentMessages: [],
+      loginCommandSent: false,
+      pendingJoinChat: false,
       lastPoseSentAt: 0,
       lastWorldSentAt: 0,
       lastWorldCenter: null,
@@ -691,24 +693,83 @@ function applyAntiAfk(username, bot) {
   }, intervalMs);
 }
 
-function triggerJoinChat(username, bot) {
+function escapeRegExp(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function recordSentMessage(username, text) {
   const state = getState(username);
+  const clean = String(text || '').trim();
+  if (!clean) return;
+  const now = Date.now();
+  state.recentSentMessages = state.recentSentMessages
+    .filter(item => now - item.at <= 5000)
+    .slice(-9);
+  state.recentSentMessages.push({ text: clean, at: now });
+}
+
+function isSelfMessage(username, raw, parsed) {
+  if (parsed?.sender && parsed.sender.toLowerCase() === username.toLowerCase()) return true;
+  const text = String(raw || '').trim();
+  if (!text) return false;
+  if (text.startsWith(`<${username}>`) || text.startsWith(`[${username}]`)) return true;
+  if (!parsed) {
+    const escapedUser = escapeRegExp(username);
+    const senderPrefixRe = new RegExp(`(?:^|\\b)${escapedUser}\\s*[»:\\]>]`, 'i');
+    if (senderPrefixRe.test(text)) return true;
+  }
+  const state = getState(username);
+  const now = Date.now();
+  state.recentSentMessages = state.recentSentMessages.filter(item => now - item.at <= 5000);
+  const lowerText = text.toLowerCase();
+  return state.recentSentMessages.some(item => {
+    const lowerSent = item.text.toLowerCase();
+    return lowerText === lowerSent || lowerText.endsWith(lowerSent);
+  });
+}
+
+function sendJoinChatNow(username, bot) {
+  const state = getState(username);
+  state.pendingJoinChat = false;
   if (state.joinTimer) { clearTimeout(state.joinTimer); state.joinTimer = null; }
   const chatCfg = state.plugins?.autoChat;
   const joinMsg = chatCfg?.joinMessage?.trim();
+  if (!chatCfg?.enabled || !joinMsg || bots.get(username) !== bot) return;
+  try {
+    const text = joinMsg.slice(0, 256);
+    recordSentMessage(username, text);
+    state.lastAutoReplyAt = Date.now();
+    bot.chat(text);
+    logLine(username, `Otomatik giriş mesajı gönderildi.`);
+  } catch (error) {
+    send({ type: 'operation-error', username, message: `Otomatik giriş mesajı hatası: ${String(error)}` });
+  }
+}
+
+function triggerJoinChat(username, bot) {
+  const state = getState(username);
+  if (state.joinTimer) { clearTimeout(state.joinTimer); state.joinTimer = null; }
+  state.pendingJoinChat = false;
+  const chatCfg = state.plugins?.autoChat;
+  const joinMsg = chatCfg?.joinMessage?.trim();
   if (!chatCfg?.enabled || !joinMsg) return;
-  state.joinTimer = setTimeout(() => {
-    if (bots.get(username) !== bot) return;
-    try {
-      const text = joinMsg.slice(0, 256);
-      state.lastSentText = text;
-      state.lastAutoReplyAt = Date.now();
-      bot.chat(text);
-      logLine(username, `Otomatik giriş mesajı gönderildi.`);
-    } catch (error) {
-      send({ type: 'operation-error', username, message: `Otomatik giriş mesajı hatası: ${String(error)}` });
-    }
-  }, 800);
+
+  const loginCfg = state.plugins?.autoLogin;
+  const waitForAutoLogin = Boolean(
+    loginCfg?.enabled &&
+    loginCfg.password &&
+    Array.isArray(loginCfg.patterns) &&
+    loginCfg.patterns.length &&
+    !state.loginCommandSent
+  );
+
+  if (waitForAutoLogin) {
+    state.pendingJoinChat = true;
+    state.joinTimer = setTimeout(() => sendJoinChatNow(username, bot), 10000);
+    return;
+  }
+
+  state.joinTimer = setTimeout(() => sendJoinChatNow(username, bot), 800);
 }
 
 function tryParseChat(username, text) {
@@ -757,8 +818,7 @@ function handleAutoChat(username, bot, text, parsed) {
   const chatCfg = state.plugins?.autoChat;
   if (!chatCfg?.enabled || !Array.isArray(chatCfg.rules) || !chatCfg.rules.length) return;
   const raw = String(text || '');
-  if (parsed?.sender && parsed.sender.toLowerCase() === username.toLowerCase()) return;
-  if (raw.startsWith(`<${username}>`) || raw.startsWith(`[${username}]`) || (state.lastSentText && raw.includes(state.lastSentText))) return;
+  if (isSelfMessage(username, raw, parsed)) return;
   const cooldownMs = Math.max(1, Number(chatCfg.cooldownSeconds) || 3) * 1000;
   if (Date.now() - state.lastAutoReplyAt < cooldownMs) return;
 
@@ -777,7 +837,7 @@ function handleAutoChat(username, bot, text, parsed) {
         .replace(/\{message\}/gi, parsed?.message || raw)
         .slice(0, 256);
       state.lastAutoReplyAt = Date.now();
-      state.lastSentText = reply;
+      recordSentMessage(username, reply);
       try {
         bot.chat(reply);
       } catch (error) {
@@ -788,16 +848,21 @@ function handleAutoChat(username, bot, text, parsed) {
   }
 }
 
-function handleAutoLogin(username, bot, text) {
+function handleAutoLogin(username, bot, text, source = 'chat') {
   const state = getState(username);
   const now = Date.now();
   const raw = String(text || '');
-  state.recentLoginLines.push({ text: raw, at: now });
-  if (state.recentLoginLines.length > 20) state.recentLoginLines = state.recentLoginLines.slice(-20);
+  if (!raw) return;
+
+  if (source === 'chat') {
+    state.recentLoginLines.push({ text: raw, at: now });
+    if (state.recentLoginLines.length > 20) state.recentLoginLines = state.recentLoginLines.slice(-20);
+  }
 
   const loginCfg = state.plugins?.autoLogin;
   if (!loginCfg?.enabled || !loginCfg.password || !Array.isArray(loginCfg.patterns) || !loginCfg.patterns.length) return;
-  if (raw.startsWith(`<${username}>`) || raw.startsWith(`[${username}]`) || (state.lastSentText && raw.includes(state.lastSentText))) return;
+  if (source !== 'chat' && loginCfg.listenTitleActionbar === false) return;
+  if (isSelfMessage(username, raw, null)) return;
 
   const cooldownMs = Math.max(1, Number(loginCfg.cooldownSeconds) || 5) * 1000;
   if (now - state.lastAutoLoginAt < cooldownMs) return;
@@ -806,9 +871,16 @@ function handleAutoLogin(username, bot, text) {
 
   for (const rule of patterns) {
     const count = Array.isArray(rule.regexLines) ? rule.regexLines.length : 0;
-    if (!count || state.recentLoginLines.length < count) continue;
-    const slice = state.recentLoginLines.slice(-count);
-    if (now - slice[0].at > 3000) continue;
+    if (!count) continue;
+    let slice;
+    if (source === 'chat') {
+      if (state.recentLoginLines.length < count) continue;
+      slice = state.recentLoginLines.slice(-count);
+      if (now - slice[0].at > 3000) continue;
+    } else {
+      if (count !== 1) continue;
+      slice = [{ text: raw, at: now }];
+    }
 
     let matched = true;
     for (let i = 0; i < count; i++) {
@@ -818,7 +890,9 @@ function handleAutoLogin(username, bot, text) {
     }
     if (!matched) continue;
 
-    state.recentLoginLines.splice(state.recentLoginLines.length - count, count);
+    if (source === 'chat') {
+      state.recentLoginLines.splice(state.recentLoginLines.length - count, count);
+    }
     const isRegister = rule.action === 'register';
     const template = isRegister
       ? (loginCfg.registerCommand || '/register {password} {password}')
@@ -829,11 +903,16 @@ function handleAutoLogin(username, bot, text) {
       .slice(0, 256);
 
     state.lastAutoLoginAt = now;
-    state.lastSentText = command;
+    state.loginCommandSent = true;
+    recordSentMessage(username, command);
     try {
       bot.chat(command);
       const maskedTemplate = template.replace(/\{password\}/gi, '***').replace(/\{username\}/gi, () => username);
       logLine(username, `Otomatik ${isRegister ? 'kayıt' : 'giriş'} komutu gönderildi: ${maskedTemplate}`);
+      if (state.pendingJoinChat) {
+        if (state.joinTimer) { clearTimeout(state.joinTimer); state.joinTimer = null; }
+        state.joinTimer = setTimeout(() => sendJoinChatNow(username, bot), 800);
+      }
       if (state.plugins?.autoLobby?.enabled && !state.lobbyCompleted) {
         scheduleAutoLobby(username, bot);
       }
@@ -851,8 +930,7 @@ function handleAutoAccept(username, bot, text, parsed) {
   if (!acceptCfg?.enabled) return;
   const raw = String(text || '');
   if (!raw) return;
-  if (parsed?.sender && parsed.sender.toLowerCase() === username.toLowerCase()) return;
-  if (raw.startsWith(`<${username}>`) || raw.startsWith(`[${username}]`) || (state.lastSentText && raw.includes(state.lastSentText))) return;
+  if (isSelfMessage(username, raw, parsed)) return;
 
   const cooldownMs = Math.max(1, Number(acceptCfg.cooldownSeconds) || 3) * 1000;
   if (Date.now() - state.lastAutoAcceptAt < cooldownMs) return;
@@ -874,7 +952,7 @@ function handleAutoAccept(username, bot, text, parsed) {
 
   const cmd = (typeof acceptCfg.acceptCommand === 'string' && acceptCfg.acceptCommand.trim() ? acceptCfg.acceptCommand.trim() : '/tpaccept').slice(0, 128);
   state.lastAutoAcceptAt = Date.now();
-  state.lastSentText = cmd;
+  recordSentMessage(username, cmd);
   try {
     bot.chat(cmd);
     logLine(username, `Otomatik istek kabul edildi: ${cmd}`);
@@ -922,7 +1000,7 @@ function applyCommandScheduler(username, bot) {
       if (now - last >= intervalMs) {
         state.schedulerLastRun[task.id] = now;
         const cmd = task.command.trim().slice(0, 256);
-        state.lastSentText = cmd;
+        recordSentMessage(username, cmd);
         try {
           bot.chat(cmd);
           logLine(username, `Zamanlanmış komut gönderildi: ${cmd}`);
@@ -946,7 +1024,7 @@ function sendLobbyPostCommand(username, bot) {
     if (bots.get(username) !== bot) return;
     try {
       const cmd = postCmd.slice(0, 128);
-      state.lastSentText = cmd;
+      recordSentMessage(username, cmd);
       bot.chat(cmd);
       logLine(username, `Otomatik lobi komutu gönderildi: ${cmd}`);
       reportWorkerAutomation(username, 'autoLobby', 'idle', 'Tamamlandı.', true);
@@ -1079,6 +1157,11 @@ function cleanupPlugins(username, bot) {
   state.schedulerLastRun = {};
   state.lobbyCompleted = false;
   state.lobbyPendingWindow = false;
+  state.loginCommandSent = false;
+  state.pendingJoinChat = false;
+  state.recentSentMessages = [];
+  state.recentLines = [];
+  state.recentLoginLines = [];
   state.manualControls.clear();
   if (state.joinTimer) { clearTimeout(state.joinTimer); state.joinTimer = null; }
   if (state.lobbyTimer) { clearTimeout(state.lobbyTimer); state.lobbyTimer = null; }
@@ -1178,7 +1261,6 @@ process.on('message', payload => {
       const initPluginsOnce = () => {
         if (pluginsInitialized) return;
         pluginsInitialized = true;
-        triggerJoinChat(username, instance);
         loadExternalPlugins(username, instance);
       };
       const seenResourcePacks = new Set();
@@ -1247,6 +1329,7 @@ process.on('message', payload => {
         if (!spawnedOnce) {
           spawnedOnce = true;
           status(username, 'connected');
+          triggerJoinChat(username, instance);
         } else {
           logLine(username, 'Yeniden doğuldu / boyut değişti.');
         }
@@ -1323,10 +1406,22 @@ process.on('message', payload => {
         clearCursor(instance);
         inventory(username, instance);
       });
-      instance.on('message', jsonMsg => {
+      instance.on('title', text => {
+        if (!current()) return;
+        const cleanTitle = stripPua(formatReason(text));
+        if (cleanTitle) handleAutoLogin(username, instance, cleanTitle, 'title');
+      });
+      instance.on('message', (jsonMsg, position) => {
         if (!current()) return;
         const rawText = String(typeof jsonMsg?.toString === 'function' ? jsonMsg.toString() : jsonMsg || '').slice(0, 2000);
         const msg = stripPua(rawText);
+        if (position === 'game_info') {
+          if (msg) {
+            send({ type: 'actionbar', username, text: msg });
+            handleAutoLogin(username, instance, msg, 'actionbar');
+          }
+          return;
+        }
         const motd = typeof jsonMsg?.toMotd === 'function' ? String(jsonMsg.toMotd()).slice(0, 4000) : '';
         const segments = motd ? parseMotdSegments(motd) : undefined;
         if (segments?.length && /^\s+$/.test(segments[0].text)) segments.shift();
@@ -1339,7 +1434,7 @@ process.on('message', payload => {
           }
           instance.emit('mynbot:chat', parsed);
         }
-        handleAutoLogin(username, instance, msg);
+        handleAutoLogin(username, instance, msg, 'chat');
         handleAutoAccept(username, instance, msg, parsed);
         handleAutoChat(username, instance, msg, parsed);
       });
@@ -1778,5 +1873,5 @@ process.on('disconnect', () => {
 });
 
 if (require.main !== module) {
-  module.exports = { handleAutoLogin, handleAutoAccept, applyCommandScheduler, stopCommandScheduler, scheduleAutoLobby, getState, cleanupPlugins, pluginStates, bots };
+  module.exports = { handleAutoLogin, handleAutoChat, handleAutoAccept, applyCommandScheduler, stopCommandScheduler, scheduleAutoLobby, getState, cleanupPlugins, pluginStates, bots };
 }
