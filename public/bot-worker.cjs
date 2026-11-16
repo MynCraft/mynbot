@@ -1529,7 +1529,12 @@ process.on('message', payload => {
       });
       instance.on('kicked', reason => {
         if (!current()) return;
-        failure = `Sunucudan atıldı: ${formatReason(reason)}`;
+        const formatted = formatReason(reason);
+        if (/failed to verify username|multiplayer\.disconnect\.unverified_username/i.test(formatted)) {
+          failure = 'Bu sunucu premium (online-mode) hesap istiyor; MynBot şu an yalnızca offline hesapları destekliyor.';
+        } else {
+          failure = `Sunucudan atıldı: ${formatted}`;
+        }
         logLine(username, failure);
       });
       instance.once('end', reason => {
