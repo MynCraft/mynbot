@@ -8,6 +8,7 @@ import type { InventoryAction, InventoryItem } from '../types/bot';
 import { useBotStore } from '../store/botStore';
 import { useI18n } from '../i18n';
 import { useMinecraftMusic, nextMusicTrack } from '../utils/minecraftMusic';
+import { SUPPORTED_VERSIONS } from '../utils/supportedVersions';
 
 const api = window.electronAPI;
 const props = defineProps<{ username: string }>();
@@ -505,7 +506,10 @@ function logTone(line: string): 'log-error' | 'log-warn' | 'log-ok' | '' {
                   </div>
                   <div>
                     <label for="server-version">{{ L('Sürüm', 'Version') }}</label>
-                    <input id="server-version" v-model="version" :placeholder="L('Otomatik', 'Auto')" />
+                    <select id="server-version" v-model="version">
+                      <option value="">{{ L('Otomatik', 'Auto') }}</option>
+                      <option v-for="v in SUPPORTED_VERSIONS" :key="v" :value="v">{{ v }}</option>
+                    </select>
                   </div>
                 </div>
               </fieldset>

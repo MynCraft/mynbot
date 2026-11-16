@@ -1,12 +1,16 @@
 'use strict';
 const path = require('node:path');
 const mineflayer = require('mineflayer');
+const mc = require('minecraft-protocol');
+const mcData = require('minecraft-data');
 const Vec3 = require('vec3');
 const { createAutomation } = require('./builtin-automation.cjs');
 
 const bots = new Map();
 const queues = new Map();
 const pluginStates = new Map();
+const connectTokens = new Map();
+const TESTED_VERSION_SET = new Set(mineflayer.testedVersions || []);
 const PLUGIN_NAME_RE = /^[a-zA-Z0-9._-]+\.(cjs|js)$/;
 
 const MC_LEGACY_COLORS = {
@@ -1148,6 +1152,26 @@ process.on('unhandledRejection', error => {
   broadcastWorkerError('Worker işlenmemiş promise hatası', error);
 });
 
+async function resolveAutoVersion(username, host, port) {
+  let timer;
+  const response = await Promise.race([
+    mc.ping({ host, port }),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('Ping zaman aşımı (5 sn)')), 5000);
+    }),
+  ]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+  const proto = response?.version?.protocol;
+  const serverName = response?.version?.name || String(proto ?? 'bilinmiyor');
+  const candidates = proto != null ? (mcData.postNettyVersionsByProtocolVersion?.pc?.[proto] || []) : [];
+  const matched = candidates.find(v => TESTED_VERSION_SET.has(v.minecraftVersion));
+  if (matched) return matched.minecraftVersion;
+  const fallback = mineflayer.latestSupportedVersion || '1.21.8';
+  logLine(username, `Sunucu sürümü ${serverName} desteklenmiyor, ${fallback} ile deneniyor (ViaVersion gerektirir)`);
+  return fallback;
+}
+
 process.on('message', payload => {
   if (!payload || typeof payload !== 'object') return;
   let { action, bot, username, message, slot, requestId, click, plugins, pluginsDir, pos, name, control, state, yaw, pitch, durationMs, entityId, enabled } = payload;
@@ -1158,6 +1182,8 @@ process.on('message', payload => {
       return;
     }
     username = bot.username;
+    const token = (connectTokens.get(username) || 0) + 1;
+    connectTokens.set(username, token);
     if (bots.has(username)) {
       const oldInstance = bots.get(username);
       logLine(username, 'Önceki bot örneği temizlenip yeniden bağlanılıyor.');
@@ -1169,6 +1195,8 @@ process.on('message', payload => {
     pluginState.plugins = plugins || null;
     pluginState.pluginsDir = pluginsDir || '';
     status(username, 'connecting');
+
+    const startBotInstance = (resolvedBot) => {
     try {
       let failure;
       let failureReported = false;
@@ -1176,7 +1204,7 @@ process.on('message', payload => {
       let spawnedOnce = false;
       let pluginsInitialized = false;
       let inventoryBound = false;
-      const instance = mineflayer.createBot({ ...bot, auth: 'offline' });
+      const instance = mineflayer.createBot({ ...resolvedBot, auth: 'offline' });
       bots.set(username, instance);
       ensurePhysicsAndFallbackAir(instance);
       const current = () => bots.get(username) === instance;
@@ -1419,7 +1447,24 @@ process.on('message', payload => {
       bots.delete(username);
       status(username, 'error', String(error));
     }
+    }; // end startBotInstance
+
+    const explicitVersion = typeof bot.version === 'string' && bot.version.trim() ? bot.version.trim() : '';
+    if (explicitVersion) {
+      startBotInstance({ ...bot, version: explicitVersion });
+    } else {
+      resolveAutoVersion(username, bot.host, bot.port).then(resolvedVersion => {
+        if (connectTokens.get(username) !== token) return;
+        startBotInstance({ ...bot, version: resolvedVersion });
+      }).catch(error => {
+        if (connectTokens.get(username) !== token) return;
+        cleanupPlugins(username, null);
+        bots.delete(username);
+        status(username, 'error', `Sunucuya erişilemedi: ${error?.message || String(error)}`);
+      });
+    }
   } else if (action === 'disconnect') {
+    connectTokens.set(username, (connectTokens.get(username) || 0) + 1);
     const instance = bots.get(username);
     cleanupPlugins(username, instance);
     if (instance) { bots.delete(username); instance.quit(); }

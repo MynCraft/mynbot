@@ -1,18 +1,23 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { BotConfig, BotPluginSettings } from '../../src/types/bot';
+import { SUPPORTED_VERSION_SET } from '../../src/utils/supportedVersions';
 import { validatePluginSettings } from './pluginConfig';
 
 export function validateBot(value: BotConfig): BotConfig {
   if (!value || typeof value.username !== 'string' || !/^[a-zA-Z0-9_]{3,16}$/.test(value.username)) throw new Error('Kullanıcı adı 3–16 harf, rakam veya alt çizgi içermeli.');
   if (typeof value.host !== 'string' || !value.host.trim() || value.host.length > 253 || /\s/.test(value.host)) throw new Error('Geçerli bir sunucu adresi girin.');
   if (!Number.isInteger(value.port) || value.port < 1 || value.port > 65535) throw new Error('Port 1 ile 65535 arasında olmalı.');
-  if (value.version !== undefined && (typeof value.version !== 'string' || value.version.length > 32)) throw new Error('Geçersiz sürüm.');
+  const trimmedVersion = typeof value.version === 'string' ? value.version.trim() : '';
+  if (value.version !== undefined && typeof value.version !== 'string') throw new Error('Geçersiz sürüm.');
+  if (trimmedVersion && !SUPPORTED_VERSION_SET.has(trimmedVersion)) {
+    throw new Error('Desteklenen sürümler: 1.8.8 – 1.21.8');
+  }
   return {
     username: value.username,
     host: value.host.trim(),
     port: value.port,
-    ...(value.version?.trim() ? { version: value.version.trim() } : {}),
+    ...(trimmedVersion ? { version: trimmedVersion } : {}),
     plugins: validatePluginSettings(value.plugins),
   };
 }
