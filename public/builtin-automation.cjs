@@ -139,6 +139,7 @@ function createAutomation(bot, options) {
   let panicCooldownUntil = 0;
   let panicDisconnecting = false;
   let defendHeld = null;
+  let windowOpenedAt = 0;
   const statuses = {};
   function report(key, state, message, finished = false) {
     if (!options.current() || disposed) return;
@@ -147,7 +148,19 @@ function createAutomation(bot, options) {
     if (JSON.stringify(old) !== JSON.stringify(next)) { statuses[key] = next; options.report({ ...statuses }); }
   }
   function valid(token, key) { return !disposed && token === generation && options.current() && Boolean(config[key]?.enabled); }
-  function blocked() { return Date.now() < manualUntil || options.isManual?.() || bot.currentWindow || bot.inventory?.selectedItem || !bot.inventory; }
+  function blocked() {
+    if (bot.currentWindow) {
+      if (!windowOpenedAt) windowOpenedAt = Date.now();
+    } else {
+      windowOpenedAt = 0;
+    }
+    return Date.now() < manualUntil || options.isManual?.() || bot.currentWindow || bot.inventory?.selectedItem || !bot.inventory;
+  }
+  function blockedReason() {
+    if (bot.currentWindow) return 'Açık pencere nedeniyle bekleniyor.';
+    if (bot.inventory?.selectedItem) return 'İmleçteki eşya nedeniyle bekleniyor.';
+    return 'Manuel işlem bekleniyor.';
+  }
   function interrupt() {
     generation++;
     if (fishingCast) {
@@ -193,6 +206,11 @@ function createAutomation(bot, options) {
   }
 
   async function totem(token) {
+    if (typeof bot.supportFeature === 'function' && bot.supportFeature('doesntHaveOffHandSlot')) {
+      report('autoTotem', 'waiting', 'Bu sürümde desteklenmiyor.');
+      nextTotem = Date.now() + 60_000;
+      return;
+    }
     const cfg = config.autoTotem;
     nextTotem = Date.now() + Math.max(1, cfg.intervalSeconds || 1) * 1000;
     const wanted = desiredOffhandName();
@@ -393,8 +411,9 @@ function createAutomation(bot, options) {
     if (disposed || !options.current()) return;
     if (handlePanic()) return;
 
-    const wantedOffhand = desiredOffhandName();
-    const needsTotem = Boolean(config.autoTotem?.enabled && bot.inventory && wantedOffhand && bot.inventory.slots[45]?.name !== wantedOffhand);
+    const noOffhand = typeof bot.supportFeature === 'function' && bot.supportFeature('doesntHaveOffHandSlot');
+    const wantedOffhand = noOffhand ? null : desiredOffhandName();
+    const needsTotem = Boolean(!noOffhand && config.autoTotem?.enabled && bot.inventory && wantedOffhand && bot.inventory.slots[45]?.name !== wantedOffhand);
     const hungry = config.autoEat?.enabled && bot.food < 20 && (bot.food <= config.autoEat.hungerThreshold || bot.health <= config.autoEat.healthThreshold);
     const needsFood = hungry && Boolean(chooseFood(bot, config.autoEat));
     if (hungry && !needsFood) report('autoEat', 'waiting', 'Uygun yiyecek bulunamadı.');
@@ -405,9 +424,14 @@ function createAutomation(bot, options) {
       if ((needsTotem || needsFood || needsDefend) && currentAction === 'autoFishing') interrupt();
       return;
     }
+    if (bot.currentWindow && windowOpenedAt && Date.now() - windowOpenedAt > 15_000 && !options.isManual?.() && Date.now() >= manualUntil && (needsTotem || needsFood)) {
+      try { if (typeof bot.closeWindow === 'function') bot.closeWindow(bot.currentWindow); } catch {}
+      windowOpenedAt = 0;
+    }
     if (blocked()) {
+      const reason = blockedReason();
       for (const key of ['autoTotem', 'autoEat', 'autoDefend', 'autoArmor', 'autoChestDump', 'autoFishing']) {
-        if (config[key]?.enabled) report(key, 'waiting', 'Manuel işlem bekleniyor.');
+        if (config[key]?.enabled) report(key, 'waiting', reason);
       }
       return;
     }

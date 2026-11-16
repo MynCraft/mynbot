@@ -630,7 +630,7 @@ function getState(username) {
       schedulerLastRun: {},
       lobbyCompleted: false,
       lobbyPendingWindow: false,
-      manualControls: new Set(),
+      manualControls: new Map(),
     };
     pluginStates.set(username, state);
   }
@@ -954,7 +954,9 @@ function handleAutoAccept(username, bot, text, parsed) {
   if (acceptCfg.onlyWhitelist) {
     const whitelist = Array.isArray(acceptCfg.whitelist) ? acceptCfg.whitelist.map(w => String(w).trim().toLowerCase()).filter(Boolean) : [];
     const senderLower = parsed?.sender ? parsed.sender.toLowerCase() : '';
-    const allowed = whitelist.some(name => (senderLower && senderLower === name) || lowerRaw.includes(name));
+    const allowed = senderLower
+      ? whitelist.some(name => senderLower === name)
+      : whitelist.some(name => new RegExp(`(?:^|\\b)${escapeRegExp(name)}(?:\\b|$)`, 'i').test(raw));
     if (!allowed) {
       reportWorkerAutomation(username, 'autoAccept', 'waiting', 'Beyaz liste dışı istek yoksayıldı.');
       return;
@@ -1218,6 +1220,9 @@ function cleanupPlugins(username, bot) {
   state.recentSentMessages = [];
   state.recentLines = [];
   state.recentLoginLines = [];
+  for (const entry of state.manualControls.values()) {
+    if (entry?.timer) clearTimeout(entry.timer);
+  }
   state.manualControls.clear();
   if (state.joinTimer) { clearTimeout(state.joinTimer); state.joinTimer = null; }
   if (state.lobbyTimer) { clearTimeout(state.lobbyTimer); state.lobbyTimer = null; }
@@ -1718,11 +1723,23 @@ process.on('message', payload => {
     const instance = bots.get(username);
     try {
       if (!instance) throw new Error('Bot bağlı değil.');
-      const manualControls = getState(username).manualControls;
-      if (state) manualControls.add(control); else manualControls.delete(control);
-      getState(username).automation?.manual();
       const validControls = ['forward', 'back', 'left', 'right', 'jump', 'sneak', 'sprint'];
       if (!validControls.includes(control)) throw new Error('Geçersiz kontrol adı.');
+      const manualControls = getState(username).manualControls;
+      const prev = manualControls.get(control);
+      if (prev?.timer) clearTimeout(prev.timer);
+      if (state) {
+        const timer = setTimeout(() => {
+          manualControls.delete(control);
+          if (bots.get(username) === instance && typeof instance.setControlState === 'function') {
+            try { instance.setControlState(control, false); } catch { /* ignore */ }
+          }
+        }, 10_000);
+        manualControls.set(control, { timer, at: Date.now() });
+      } else {
+        manualControls.delete(control);
+      }
+      getState(username).automation?.manual();
       if (typeof instance.setControlState === 'function') {
         instance.setControlState(control, Boolean(state));
       }
@@ -1771,8 +1788,6 @@ process.on('message', payload => {
     try {
       if (!instance || !instance.entity) throw new Error('Bot bağlı değil.');
       if (!isChunkLoadedAt(instance, instance.entity.position)) throw new Error('Dünya henüz yüklenmedi.');
-      const manualControls = getState(username).manualControls;
-      if (state) manualControls.add(control); else manualControls.delete(control);
       getState(username).automation?.manual();
       const validControls = ['forward', 'back', 'left', 'right', 'jump', 'sneak', 'sprint'];
       if (!validControls.includes(control)) throw new Error('Geçersiz kontrol adı.');
