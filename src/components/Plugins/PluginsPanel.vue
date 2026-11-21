@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import { defaultPluginSettings, type BotPluginSettings, type ChatPatternRule } from '../../types/bot';
+import { defaultPluginSettings, type BotPluginSettings, type ChatPatternRule, type LoginPatternRule } from '../../types/bot';
 import { useBotStore } from '../../store/botStore';
 import { useI18n } from '../../i18n';
 import PluginIcon from './PluginIcon.vue';
@@ -36,9 +36,34 @@ function cloneSettings(source?: BotPluginSettings): BotPluginSettings {
     autoEat: { ...defaults.autoEat, ...(base.autoEat || {}) },
     autoArmor: { ...defaults.autoArmor, ...(base.autoArmor || {}) },
     autoFishing: { ...defaults.autoFishing, ...(base.autoFishing || {}) },
+    autoTotem: { ...defaults.autoTotem, ...(base.autoTotem || {}) },
+    autoPanic: { ...defaults.autoPanic, ...(base.autoPanic || {}), whitelist: [...(base.autoPanic?.whitelist || defaults.autoPanic.whitelist)] },
+    autoDefend: { ...defaults.autoDefend, ...(base.autoDefend || {}) },
+    autoLobby: { ...defaults.autoLobby, ...(base.autoLobby || {}) },
+    autoAccept: {
+      ...defaults.autoAccept,
+      ...(base.autoAccept || {}),
+      whitelist: [...(base.autoAccept?.whitelist || defaults.autoAccept.whitelist)],
+      triggers: [...(base.autoAccept?.triggers ?? defaults.autoAccept.triggers)],
+    },
+    commandScheduler: {
+      ...defaults.commandScheduler,
+      ...(base.commandScheduler || {}),
+      tasks: (base.commandScheduler?.tasks || []).map(task => ({ ...task })),
+    },
+    autoChestDump: {
+      ...defaults.autoChestDump,
+      ...(base.autoChestDump || {}),
+      keepKeywords: [...(base.autoChestDump?.keepKeywords || defaults.autoChestDump.keepKeywords)],
+    },
     autoReconnect: { ...defaults.autoReconnect, ...(base.autoReconnect || {}) },
     antiAfk: { ...defaults.antiAfk, ...(base.antiAfk || {}) },
     autoChat: { ...defaults.autoChat, ...(base.autoChat || {}), rules: (base.autoChat?.rules || []).map(r => ({ ...r })) },
+    autoLogin: {
+      ...defaults.autoLogin,
+      ...(base.autoLogin || {}),
+      patterns: (base.autoLogin?.patterns || []).map(p => ({ ...p, regexLines: [...p.regexLines], ...(p.sampleLines ? { sampleLines: [...p.sampleLines] } : {}) })),
+    },
     chatPatterns: (base.chatPatterns || []).map(p => ({ ...p, regexLines: [...p.regexLines], ...(p.sampleLines ? { sampleLines: [...p.sampleLines] } : {}) })),
     enabledScripts: [...(base.enabledScripts || [])],
     moduleIcons: { ...(base.moduleIcons || {}) },
@@ -60,7 +85,22 @@ watch(
 );
 
 const activeModulesCount = computed(() =>
-  [draft.value.autoEat.enabled, draft.value.autoArmor.enabled, draft.value.autoFishing.enabled, draft.value.autoReconnect.enabled, draft.value.antiAfk.enabled, draft.value.autoChat.enabled].filter(Boolean).length
+  [
+    draft.value.autoEat.enabled,
+    draft.value.autoArmor.enabled,
+    draft.value.autoFishing.enabled,
+    draft.value.autoTotem.enabled,
+    draft.value.autoPanic.enabled,
+    draft.value.autoDefend.enabled,
+    draft.value.autoLobby.enabled,
+    draft.value.autoAccept.enabled,
+    draft.value.commandScheduler.enabled,
+    draft.value.autoChestDump.enabled,
+    draft.value.autoReconnect.enabled,
+    draft.value.antiAfk.enabled,
+    draft.value.autoChat.enabled,
+    draft.value.autoLogin.enabled,
+  ].filter(Boolean).length
 );
 
 function automationHint(id: string, enabled: boolean): string {
@@ -106,6 +146,83 @@ const builtinCards = computed<PluginCardItem[]>(() => [
     status: automationHint('autoFishing', draft.value.autoFishing.enabled),
   },
   {
+    id: 'autoTotem',
+    kind: 'builtin',
+    defaultIcon: 'item:totem_of_undying',
+    title: t('plugins.autoTotem.title'),
+    description: t('plugins.autoTotem.description'),
+    summary: `${draft.value.autoTotem.priorityItem === 'shield' ? L('Kalkan', 'Shield') : 'Totem'} · ${L('Can', 'HP')} ≤ ${draft.value.autoTotem.healthThreshold}`,
+    enabled: draft.value.autoTotem.enabled,
+    hasToggle: true,
+    status: automationHint('autoTotem', draft.value.autoTotem.enabled),
+  },
+  {
+    id: 'autoPanic',
+    kind: 'builtin',
+    defaultIcon: 'Zap',
+    title: t('plugins.autoPanic.title'),
+    description: t('plugins.autoPanic.description'),
+    summary: `${L('Can', 'HP')} ≤ ${draft.value.autoPanic.healthThreshold} · ${draft.value.autoPanic.action === 'command' ? draft.value.autoPanic.panicCommand : L('Çıkış', 'Disconnect')}`,
+    enabled: draft.value.autoPanic.enabled,
+    hasToggle: true,
+    status: automationHint('autoPanic', draft.value.autoPanic.enabled),
+  },
+  {
+    id: 'autoDefend',
+    kind: 'builtin',
+    defaultIcon: 'Swords',
+    title: t('plugins.autoDefend.title'),
+    description: t('plugins.autoDefend.description'),
+    summary: `${draft.value.autoDefend.radius}m · ${draft.value.autoDefend.attackIntervalMs}ms`,
+    enabled: draft.value.autoDefend.enabled,
+    hasToggle: true,
+    status: automationHint('autoDefend', draft.value.autoDefend.enabled),
+  },
+  {
+    id: 'autoLobby',
+    kind: 'builtin',
+    defaultIcon: 'Compass',
+    title: t('plugins.autoLobby.title'),
+    description: t('plugins.autoLobby.description'),
+    summary: `${draft.value.autoLobby.delaySeconds} ${L('sn', 's')}${draft.value.autoLobby.hotbarSlot > 0 ? ` · Slot ${draft.value.autoLobby.hotbarSlot}` : ''}${draft.value.autoLobby.postCommand ? ` · ${draft.value.autoLobby.postCommand}` : ''}`,
+    enabled: draft.value.autoLobby.enabled,
+    hasToggle: true,
+    status: automationHint('autoLobby', draft.value.autoLobby.enabled),
+  },
+  {
+    id: 'autoAccept',
+    kind: 'builtin',
+    defaultIcon: 'Check',
+    title: t('plugins.autoAccept.title'),
+    description: t('plugins.autoAccept.description'),
+    summary: `${draft.value.autoAccept.onlyWhitelist ? `${draft.value.autoAccept.whitelist.length} ${L('güvenli', 'trusted')}` : L('Herkes', 'Anyone')} · ${draft.value.autoAccept.acceptCommand}`,
+    enabled: draft.value.autoAccept.enabled,
+    hasToggle: true,
+    status: automationHint('autoAccept', draft.value.autoAccept.enabled),
+  },
+  {
+    id: 'commandScheduler',
+    kind: 'builtin',
+    defaultIcon: 'item:clock',
+    title: t('plugins.commandScheduler.title'),
+    description: t('plugins.commandScheduler.description'),
+    summary: `${draft.value.commandScheduler.tasks.length} ${L('görev', 'tasks')}`,
+    enabled: draft.value.commandScheduler.enabled,
+    hasToggle: true,
+    status: automationHint('commandScheduler', draft.value.commandScheduler.enabled),
+  },
+  {
+    id: 'autoChestDump',
+    kind: 'builtin',
+    defaultIcon: 'Box',
+    title: t('plugins.autoChestDump.title'),
+    description: t('plugins.autoChestDump.description'),
+    summary: `${L('Boş', 'Free')} ≤ ${draft.value.autoChestDump.freeSlotsThreshold} · ${draft.value.autoChestDump.searchRadius}m`,
+    enabled: draft.value.autoChestDump.enabled,
+    hasToggle: true,
+    status: automationHint('autoChestDump', draft.value.autoChestDump.enabled),
+  },
+  {
     id: 'autoReconnect',
     kind: 'builtin',
     defaultIcon: 'RefreshCw',
@@ -134,6 +251,17 @@ const builtinCards = computed<PluginCardItem[]>(() => [
     summary: `${draft.value.autoChat.rules.length} ${L('kural', 'rules')} · ${draft.value.autoChat.cooldownSeconds} ${L('sn', 's')}`,
     enabled: draft.value.autoChat.enabled,
     hasToggle: true,
+  },
+  {
+    id: 'autoLogin',
+    kind: 'builtin',
+    defaultIcon: 'KeyRound',
+    title: t('plugins.autoLogin.title'),
+    description: t('plugins.autoLogin.description'),
+    summary: `${draft.value.autoLogin.password ? L('Şifre ayarlı', 'Password set') : L('Şifre yok', 'No password')} · ${draft.value.autoLogin.patterns.length} ${L('kalıp', 'patterns')} · ${draft.value.autoLogin.cooldownSeconds} ${L('sn', 's')}`,
+    enabled: draft.value.autoLogin.enabled,
+    hasToggle: true,
+    status: automationHint('autoLogin', draft.value.autoLogin.enabled),
   },
   {
     id: 'chatCalibrator',
@@ -213,6 +341,41 @@ function toggleModule(id: string) {
     void persist();
     return;
   }
+  if (id === 'autoTotem') {
+    draft.value.autoTotem.enabled = !draft.value.autoTotem.enabled;
+    void persist();
+    return;
+  }
+  if (id === 'autoPanic') {
+    draft.value.autoPanic.enabled = !draft.value.autoPanic.enabled;
+    void persist();
+    return;
+  }
+  if (id === 'autoDefend') {
+    draft.value.autoDefend.enabled = !draft.value.autoDefend.enabled;
+    void persist();
+    return;
+  }
+  if (id === 'autoLobby') {
+    draft.value.autoLobby.enabled = !draft.value.autoLobby.enabled;
+    void persist();
+    return;
+  }
+  if (id === 'autoAccept') {
+    draft.value.autoAccept.enabled = !draft.value.autoAccept.enabled;
+    void persist();
+    return;
+  }
+  if (id === 'commandScheduler') {
+    draft.value.commandScheduler.enabled = !draft.value.commandScheduler.enabled;
+    void persist();
+    return;
+  }
+  if (id === 'autoChestDump') {
+    draft.value.autoChestDump.enabled = !draft.value.autoChestDump.enabled;
+    void persist();
+    return;
+  }
   if (id === 'autoReconnect') {
     draft.value.autoReconnect.enabled = !draft.value.autoReconnect.enabled;
     void persist();
@@ -225,6 +388,11 @@ function toggleModule(id: string) {
   }
   if (id === 'autoChat') {
     draft.value.autoChat.enabled = !draft.value.autoChat.enabled;
+    void persist();
+    return;
+  }
+  if (id === 'autoLogin') {
+    draft.value.autoLogin.enabled = !draft.value.autoLogin.enabled;
     void persist();
     return;
   }
@@ -265,8 +433,33 @@ function removePattern(id: string) {
   void persist(L('Sohbet kalıbı silindi.', 'Chat pattern deleted.'));
 }
 
+function addLoginPattern(rule: LoginPatternRule) {
+  if (draft.value.autoLogin.patterns.length >= 20) return;
+  draft.value.autoLogin.patterns.push(rule);
+  void persist(`"${rule.name}" ${L('kalıbı kaydedildi.', 'pattern saved.')}`);
+}
+
+function removeLoginPattern(id: string) {
+  draft.value.autoLogin.patterns = draft.value.autoLogin.patterns.filter(p => p.id !== id);
+  void persist(L('Giriş kalıbı silindi.', 'Login pattern deleted.'));
+}
+
 function removeRule(index: number) {
   draft.value.autoChat.rules.splice(index, 1);
+}
+
+function addScheduledTask() {
+  if (draft.value.commandScheduler.tasks.length >= 20) return;
+  draft.value.commandScheduler.tasks.push({
+    id: `task-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    command: '',
+    intervalSeconds: 300,
+    enabled: true,
+  });
+}
+
+function removeScheduledTask(index: number) {
+  draft.value.commandScheduler.tasks.splice(index, 1);
 }
 
 function toggleScript(filename: string) {
@@ -427,8 +620,12 @@ async function deleteScript(filename: string) {
       @toggle="activeModuleId && toggleModule(activeModuleId)"
       @add-rule="addRule"
       @remove-rule="removeRule"
+      @add-scheduled-task="addScheduledTask"
+      @remove-scheduled-task="removeScheduledTask"
       @add-pattern="addPattern"
       @remove-pattern="removePattern"
+      @add-login-pattern="addLoginPattern"
+      @remove-login-pattern="removeLoginPattern"
       @delete-script="deleteScript"
       @set-icon="icon => activeModuleId && setModuleIcon(activeModuleId, icon)"
     />

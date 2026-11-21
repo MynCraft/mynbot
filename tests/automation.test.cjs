@@ -64,5 +64,104 @@ function fake(items) {
   const missing = createAutomation(missingRod, { ...options, report: v => missingReports.push(v) });
   missing.update({ autoFishing: { enabled: true, recastDelaySeconds: 1, timeoutSeconds: 10 } });
   await wait(20); assert(missingReports.some(v => v.autoFishing?.state === 'waiting')); assert.equal(missingRod.calls.length, 0); missing.stop();
+
+  // autoTotem: shield by default, switch to totem on low health
+  const totemItem = { name: 'totem_of_undying', slot: 10 };
+  const shieldItem = { name: 'shield', slot: 11 };
+  const totemBot = fake([totemItem, shieldItem]);
+  totemBot.food = 20; totemBot.health = 20;
+  totemBot.equip = async (item, slot) => { totemBot.calls.push(['equip', item.name, slot]); if (slot === 'off-hand') totemBot.inventory.slots[45] = item; };
+  const totemCtrl = createAutomation(totemBot, options);
+  totemCtrl.update({ autoTotem: { enabled: true, priorityItem: 'shield', healthThreshold: 12, intervalSeconds: 1 } });
+  await wait(20);
+  assert.equal(totemBot.inventory.slots[45].name, 'shield');
+  totemBot.health = 10; totemBot.emit('health');
+  await wait(20);
+  assert.equal(totemBot.inventory.slots[45].name, 'totem_of_undying');
+  totemCtrl.stop();
+
+  // autoPanic: whitelist ignored, stranger or low health triggers panic
+  const panicBot = fake([]);
+  panicBot.food = 20; panicBot.health = 20;
+  panicBot.entity = { position: { x: 0, y: 64, z: 0 } };
+  panicBot.entities = {
+    1: { type: 'player', username: 'TrustedFriend', position: { x: 2, y: 64, z: 0 } },
+  };
+  let panicEvents = [];
+  const panicCtrl = createAutomation(panicBot, { ...options, onPanicDisconnect: (reason, disableReconnect) => panicEvents.push({ reason, disableReconnect }) });
+  panicCtrl.update({ autoPanic: { enabled: true, healthThreshold: 6, disconnectOnPlayer: true, playerRadius: 12, whitelist: ['TrustedFriend'], action: 'disconnect', panicCommand: '/spawn', disableReconnect: true } });
+  await wait(20);
+  assert.equal(panicEvents.length, 0);
+  panicBot.entities[2] = { type: 'player', username: 'Stranger', position: { x: 5, y: 64, z: 0 } };
+  panicCtrl.tick();
+  await wait(20);
+  assert.equal(panicEvents.length, 1);
+  assert.equal(panicEvents[0].disableReconnect, true);
+  panicCtrl.stop();
+
+  // autoDefend: equips best sword, skips creeper when attackCreepers=false
+  const defendBot = fake([{ name: 'diamond_sword', slot: 9 }]);
+  defendBot.food = 20; defendBot.health = 20;
+  defendBot.entity = { position: { x: 0, y: 64, z: 0 } };
+  const creeper = { type: 'mob', name: 'creeper', position: { x: 2, y: 64, z: 0 } };
+  const zombie = { type: 'mob', name: 'zombie', position: { x: 3, y: 64, z: 0 } };
+  defendBot.entities = { 1: creeper };
+  defendBot.attack = target => defendBot.calls.push(['attack', target.name]);
+  const defendCtrl = createAutomation(defendBot, options);
+  defendCtrl.update({ autoDefend: { enabled: true, radius: 4, attackIntervalMs: 300, autoEquipWeapon: true, attackCreepers: false, restoreHeldItem: true } });
+  await wait(20);
+  assert.equal(defendBot.calls.filter(c => c[0] === 'attack').length, 0);
+  defendBot.entities[2] = zombie;
+  defendCtrl.tick();
+  await wait(20);
+  assert(defendBot.calls.some(c => c[0] === 'equip' && c[1] === 'diamond_sword' && c[2] === 'hand'));
+  assert(defendBot.calls.some(c => c[0] === 'attack' && c[1] === 'zombie'));
+  defendCtrl.stop();
+
+  // autoChestDump: deposits cobble, keeps food/tools/keywords
+  const cobble = { name: 'cobblestone', type: 4, metadata: 0, count: 64, slot: 9 };
+  const keptDiamond = { name: 'diamond', type: 264, metadata: 0, count: 5, slot: 10 };
+  const keptBeef = { name: 'cooked_beef', type: 364, metadata: 0, count: 16, slot: 11 };
+  const keptPick = { name: 'diamond_pickaxe', type: 278, metadata: 0, count: 1, slot: 12 };
+  const chestBot = fake([cobble, keptDiamond, keptBeef, keptPick]);
+  chestBot.food = 20;
+  for (let i = 9; i < 45; i++) chestBot.inventory.slots[i] = { name: 'dirt', slot: i };
+  chestBot.inventory.slots[44] = null; // 1 free slot <= threshold 3
+  const deposited = [];
+  chestBot.findBlock = () => ({ name: 'chest', position: { x: 1, y: 64, z: 0 } });
+  chestBot.openContainer = async () => ({
+    deposit: async (type, _meta, count) => { deposited.push({ type, count }); },
+    close: () => {},
+  });
+  const chestCtrl = createAutomation(chestBot, options);
+  chestCtrl.update({ autoChestDump: { enabled: true, freeSlotsThreshold: 3, searchRadius: 4, intervalSeconds: 5, keepFoods: true, keepToolsAndArmor: true, keepKeywords: ['diamond'] } });
+  await wait(20);
+  assert.deepEqual(deposited, [{ type: 4, count: 64 }]);
+  chestCtrl.stop();
+
+  // autoAccept & commandScheduler & autoLobby in bot-worker
+  const { handleAutoAccept, applyCommandScheduler, stopCommandScheduler, scheduleAutoLobby, getState, cleanupPlugins, bots } = require('../public/bot-worker.cjs');
+  const workerBot = new EventEmitter();
+  const chatLog = [];
+  workerBot.chat = msg => chatLog.push(msg);
+  workerBot.setQuickBarSlot = s => chatLog.push(['slot', s]);
+  workerBot.activateItem = () => chatLog.push(['activate']);
+  bots.set('WorkerTester', workerBot);
+  const st = getState('WorkerTester');
+  st.plugins = {
+    autoAccept: { enabled: true, onlyWhitelist: true, whitelist: ['Alice'], triggers: ['ışınlanma isteği'], acceptCommand: '/tpaccept', cooldownSeconds: 1 },
+    commandScheduler: { enabled: true, tasks: [{ id: 't1', command: '/sell all', intervalSeconds: 5, enabled: true }] },
+    autoLobby: { enabled: true, delaySeconds: 1, hotbarSlot: 1, clickSlot: -1, itemKeyword: '', postCommand: '/is go' },
+  };
+  handleAutoAccept('WorkerTester', workerBot, 'Bob sana ışınlanma isteği gönderdi.', null);
+  assert.equal(chatLog.length, 0);
+  handleAutoAccept('WorkerTester', workerBot, 'Alice sana ışınlanma isteği gönderdi.', null);
+  assert.equal(chatLog[0], '/tpaccept');
+  applyCommandScheduler('WorkerTester', workerBot);
+  stopCommandScheduler('WorkerTester');
+  scheduleAutoLobby('WorkerTester', workerBot);
+  cleanupPlugins('WorkerTester', workerBot);
+  bots.delete('WorkerTester');
+
   console.log('automation food, armor protection, cancellation, timeout and manual window passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

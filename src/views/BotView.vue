@@ -15,11 +15,32 @@ const store = useBotStore();
 const { locale, toggleLocale, L, t } = useI18n();
 const {
   musicPlaying,
+  musicMuted,
+  musicVolume,
+  setMusicVolume,
   toggleMusic,
   initMusicAutoStart,
   musicCatalogState,
   currentTrackName,
 } = useMinecraftMusic();
+
+const volumePercent = computed(() => (musicMuted.value ? 0 : Math.round(musicVolume.value * 100)));
+const volumeIcon = computed(() => {
+  if (!musicPlaying.value || musicMuted.value || volumePercent.value === 0) return 'VolumeX';
+  if (volumePercent.value < 40) return 'Volume1';
+  return 'Volume2';
+});
+
+function onVolumeInput(event: Event) {
+  const val = Number((event.target as HTMLInputElement).value);
+  setMusicVolume(val / 100);
+}
+
+function onVolumeWheel(event: WheelEvent) {
+  const step = event.deltaY < 0 ? 0.02 : -0.02;
+  const base = musicMuted.value ? 0 : musicVolume.value;
+  setMusicVolume(base + step);
+}
 
 const error = ref('');
 const busy = ref(false);
@@ -373,27 +394,42 @@ function logTone(line: string): 'log-error' | 'log-warn' | 'log-ok' | '' {
             >
               <AppIcon name="RefreshCw" />
             </button>
-            <!-- Ambient Minecraft Music Button -->
-            <button
-              type="button"
-              class="music-button"
-              :class="{ playing: musicPlaying }"
-              :aria-label="musicPlaying ? L('Müziği kapat', 'Mute music') : L('Müziği aç', 'Play music')"
-              :title="musicPlaying ? L(`Çalıyor: ${currentTrackName} (Kapatmak için sol tık, parça değiştirmek için sağ tık)`, `Playing: ${currentTrackName} (Left click: mute, Right click: next track)`) : L('Minecraft müziklerini aç', 'Play Minecraft ambient music')"
-              @click="toggleMusic()"
-              @contextmenu.prevent="nextMusicTrack()"
-            >
-              <AppIcon :name="musicPlaying ? 'Volume2' : 'VolumeX'" />
-              <span v-if="musicPlaying" class="music-track-tag">{{ currentTrackName }}</span>
-              <span v-else>{{ L('Sessiz', 'Muted') }}</span>
-              <span
-                v-if="musicCatalogState.totalCount > 0 && musicCatalogState.downloadedCount < musicCatalogState.totalCount"
-                class="music-dl-tag"
-                :title="`${t('music.downloading')}: ${musicCatalogState.downloadedCount}/${musicCatalogState.totalCount}`"
+            <!-- Ambient Minecraft Music Button + Volume Slider -->
+            <div class="music-control-group" @wheel.prevent="onVolumeWheel">
+              <button
+                type="button"
+                class="music-button"
+                :class="{ playing: musicPlaying }"
+                :aria-label="musicPlaying ? L('Müziği kapat', 'Mute music') : L('Müziği aç', 'Play music')"
+                :title="musicPlaying ? L(`Çalıyor: ${currentTrackName} · Ses: %${volumePercent} (Sol tık: sustur, Sağ tık: sonraki, Tekerlek: ses)`, `Playing: ${currentTrackName} · Volume: ${volumePercent}% (Left click: mute, Right click: next, Wheel: volume)`) : L('Minecraft müziklerini aç', 'Play Minecraft ambient music')"
+                @click="toggleMusic()"
+                @contextmenu.prevent="nextMusicTrack()"
               >
-                ({{ musicCatalogState.downloadedCount }}/{{ musicCatalogState.totalCount }})
-              </span>
-            </button>
+                <AppIcon :name="volumeIcon" />
+                <span v-if="musicPlaying" class="music-track-tag">{{ currentTrackName }}</span>
+                <span v-else>{{ L('Sessiz', 'Muted') }}</span>
+                <span
+                  v-if="musicCatalogState.totalCount > 0 && musicCatalogState.downloadedCount < musicCatalogState.totalCount"
+                  class="music-dl-tag"
+                  :title="`${t('music.downloading')}: ${musicCatalogState.downloadedCount}/${musicCatalogState.totalCount}`"
+                >
+                  ({{ musicCatalogState.downloadedCount }}/{{ musicCatalogState.totalCount }})
+                </span>
+              </button>
+              <div class="music-volume-wrap" :title="L(`Ses seviyesi: %${volumePercent}`, `Volume: ${volumePercent}%`)">
+                <input
+                  type="range"
+                  class="music-volume-slider"
+                  min="0"
+                  max="100"
+                  step="1"
+                  :value="volumePercent"
+                  :aria-label="L('Müzik ses seviyesi', 'Music volume')"
+                  @input="onVolumeInput"
+                />
+                <span class="music-volume-pct">%{{ volumePercent }}</span>
+              </div>
+            </div>
             <button
               type="button"
               class="bg-toggle-btn icon-only-btn"
@@ -627,5 +663,57 @@ function logTone(line: string): 'log-error' | 'log-warn' | 'log-ok' | '' {
   margin-left: 2px;
   font-feature-settings: 'tnum';
   font-variant-numeric: tabular-nums;
+}
+.music-control-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(20, 31, 52, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  padding-right: 9px;
+}
+.music-control-group .music-button {
+  border: 0;
+  background: transparent;
+  padding-right: 6px;
+}
+.music-control-group .music-button:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+.music-volume-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.music-volume-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 58px;
+  height: 4px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+  accent-color: var(--accent, #7dd396);
+  cursor: pointer;
+}
+.music-volume-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--accent, #7dd396);
+  box-shadow: 0 0 6px rgba(0, 0, 0, 0.45);
+  cursor: pointer;
+}
+.music-volume-pct {
+  font-size: 10px;
+  color: #9fb0c9;
+  min-width: 26px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
 }
 </style>

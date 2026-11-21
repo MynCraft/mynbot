@@ -631,21 +631,58 @@ function getState(username) {
       afkTimer: null,
       joinTimer: null,
       moveTimer: null,
+      lobbyTimer: null,
+      schedulerTimer: null,
       cleanups: [],
       parsedChatListeners: [],
       recentLines: [],
+      recentLoginLines: [],
       lastAutoReplyAt: 0,
+      lastAutoLoginAt: 0,
+      lastAutoAcceptAt: 0,
       lastSentText: '',
       lastPoseSentAt: 0,
       lastWorldSentAt: 0,
       lastWorldCenter: null,
       invTimer: null,
       automation: null,
+      automationStatuses: {},
+      workerStatuses: {},
+      schedulerLastRun: {},
+      lobbyCompleted: false,
+      lobbyPendingWindow: false,
       manualControls: new Set(),
     };
     pluginStates.set(username, state);
   }
   return state;
+}
+
+function sendCombinedAutomation(username) {
+  const state = pluginStates.get(username);
+  if (!state) return;
+  send({
+    type: 'automation',
+    username,
+    automation: {
+      ...(state.automationStatuses || {}),
+      ...(state.workerStatuses || {}),
+    },
+  });
+}
+
+function reportWorkerAutomation(username, key, statusState, message, finished = false) {
+  const state = getState(username);
+  const old = state.workerStatuses[key];
+  const next = {
+    state: statusState,
+    ...(message ? { message } : {}),
+    ...(finished ? { lastRunAt: Date.now() } : old?.lastRunAt ? { lastRunAt: old.lastRunAt } : {}),
+  };
+  if (JSON.stringify(old) !== JSON.stringify(next)) {
+    state.workerStatuses[key] = next;
+    sendCombinedAutomation(username);
+  }
 }
 
 function stopAfk(username, bot) {
@@ -785,6 +822,247 @@ function handleAutoChat(username, bot, text, parsed) {
   }
 }
 
+function handleAutoLogin(username, bot, text) {
+  const state = getState(username);
+  const now = Date.now();
+  const raw = String(text || '');
+  state.recentLoginLines.push({ text: raw, at: now });
+  if (state.recentLoginLines.length > 20) state.recentLoginLines = state.recentLoginLines.slice(-20);
+
+  const loginCfg = state.plugins?.autoLogin;
+  if (!loginCfg?.enabled || !loginCfg.password || !Array.isArray(loginCfg.patterns) || !loginCfg.patterns.length) return;
+  if (raw.startsWith(`<${username}>`) || raw.startsWith(`[${username}]`) || (state.lastSentText && raw.includes(state.lastSentText))) return;
+
+  const cooldownMs = Math.max(1, Number(loginCfg.cooldownSeconds) || 5) * 1000;
+  if (now - state.lastAutoLoginAt < cooldownMs) return;
+
+  const patterns = [...loginCfg.patterns].sort((a, b) => (b.lineCount || 1) - (a.lineCount || 1));
+
+  for (const rule of patterns) {
+    const count = Array.isArray(rule.regexLines) ? rule.regexLines.length : 0;
+    if (!count || state.recentLoginLines.length < count) continue;
+    const slice = state.recentLoginLines.slice(-count);
+    if (now - slice[0].at > 3000) continue;
+
+    let matched = true;
+    for (let i = 0; i < count; i++) {
+      let re;
+      try { re = new RegExp(rule.regexLines[i], 'i'); } catch { matched = false; break; }
+      if (!re.test(slice[i].text)) { matched = false; break; }
+    }
+    if (!matched) continue;
+
+    state.recentLoginLines.splice(state.recentLoginLines.length - count, count);
+    const isRegister = rule.action === 'register';
+    const template = isRegister
+      ? (loginCfg.registerCommand || '/register {password} {password}')
+      : (loginCfg.loginCommand || '/login {password}');
+    const command = template
+      .replace(/\{password\}/gi, () => loginCfg.password)
+      .replace(/\{username\}/gi, () => username)
+      .slice(0, 256);
+
+    state.lastAutoLoginAt = now;
+    state.lastSentText = command;
+    try {
+      bot.chat(command);
+      const maskedTemplate = template.replace(/\{password\}/gi, '***').replace(/\{username\}/gi, () => username);
+      logLine(username, `Otomatik ${isRegister ? 'kayıt' : 'giriş'} komutu gönderildi: ${maskedTemplate}`);
+      if (state.plugins?.autoLobby?.enabled && !state.lobbyCompleted) {
+        scheduleAutoLobby(username, bot);
+      }
+    } catch (error) {
+      const safeErr = String(error).split(loginCfg.password).join('***');
+      send({ type: 'operation-error', username, message: `Otomatik giriş hatası: ${safeErr}` });
+    }
+    break;
+  }
+}
+
+function handleAutoAccept(username, bot, text, parsed) {
+  const state = getState(username);
+  const acceptCfg = state.plugins?.autoAccept;
+  if (!acceptCfg?.enabled) return;
+  const raw = String(text || '');
+  if (!raw) return;
+  if (parsed?.sender && parsed.sender.toLowerCase() === username.toLowerCase()) return;
+  if (raw.startsWith(`<${username}>`) || raw.startsWith(`[${username}]`) || (state.lastSentText && raw.includes(state.lastSentText))) return;
+
+  const cooldownMs = Math.max(1, Number(acceptCfg.cooldownSeconds) || 3) * 1000;
+  if (Date.now() - state.lastAutoAcceptAt < cooldownMs) return;
+
+  const triggers = Array.isArray(acceptCfg.triggers) ? acceptCfg.triggers : [];
+  const lowerRaw = raw.toLowerCase();
+  const matchedTrigger = triggers.some(tr => typeof tr === 'string' && tr.trim() && lowerRaw.includes(tr.trim().toLowerCase()));
+  if (!matchedTrigger) return;
+
+  if (acceptCfg.onlyWhitelist) {
+    const whitelist = Array.isArray(acceptCfg.whitelist) ? acceptCfg.whitelist.map(w => String(w).trim().toLowerCase()).filter(Boolean) : [];
+    const senderLower = parsed?.sender ? parsed.sender.toLowerCase() : '';
+    const allowed = whitelist.some(name => (senderLower && senderLower === name) || lowerRaw.includes(name));
+    if (!allowed) {
+      reportWorkerAutomation(username, 'autoAccept', 'waiting', 'Beyaz liste dışı istek yoksayıldı.');
+      return;
+    }
+  }
+
+  const cmd = (typeof acceptCfg.acceptCommand === 'string' && acceptCfg.acceptCommand.trim() ? acceptCfg.acceptCommand.trim() : '/tpaccept').slice(0, 128);
+  state.lastAutoAcceptAt = Date.now();
+  state.lastSentText = cmd;
+  try {
+    bot.chat(cmd);
+    logLine(username, `Otomatik istek kabul edildi: ${cmd}`);
+    reportWorkerAutomation(username, 'autoAccept', 'idle', 'İstek kabul edildi.', true);
+  } catch (error) {
+    send({ type: 'operation-error', username, message: `Otomatik kabul hatası: ${String(error)}` });
+  }
+}
+
+function stopCommandScheduler(username) {
+  const state = pluginStates.get(username);
+  if (!state) return;
+  if (state.schedulerTimer) {
+    clearInterval(state.schedulerTimer);
+    state.schedulerTimer = null;
+  }
+}
+
+function applyCommandScheduler(username, bot) {
+  stopCommandScheduler(username);
+  const state = getState(username);
+  const cfg = state.plugins?.commandScheduler;
+  const tasks = Array.isArray(cfg?.tasks) ? cfg.tasks.filter(t => t && t.enabled && typeof t.command === 'string' && t.command.trim()) : [];
+  if (!cfg?.enabled || !tasks.length || bots.get(username) !== bot) {
+    reportWorkerAutomation(username, 'commandScheduler', 'idle');
+    return;
+  }
+  const nowInit = Date.now();
+  for (const task of tasks) {
+    if (!state.schedulerLastRun[task.id]) {
+      state.schedulerLastRun[task.id] = nowInit;
+    }
+  }
+  reportWorkerAutomation(username, 'commandScheduler', 'waiting', `${tasks.length} görev zamanlandı.`);
+  state.schedulerTimer = setInterval(() => {
+    if (bots.get(username) !== bot || !state.plugins?.commandScheduler?.enabled) {
+      stopCommandScheduler(username);
+      return;
+    }
+    const now = Date.now();
+    const activeTasks = (state.plugins.commandScheduler.tasks || []).filter(t => t && t.enabled && typeof t.command === 'string' && t.command.trim());
+    for (const task of activeTasks) {
+      const intervalMs = Math.max(5, Number(task.intervalSeconds) || 300) * 1000;
+      const last = state.schedulerLastRun[task.id] || 0;
+      if (now - last >= intervalMs) {
+        state.schedulerLastRun[task.id] = now;
+        const cmd = task.command.trim().slice(0, 256);
+        state.lastSentText = cmd;
+        try {
+          bot.chat(cmd);
+          logLine(username, `Zamanlanmış komut gönderildi: ${cmd}`);
+          reportWorkerAutomation(username, 'commandScheduler', 'idle', cmd, true);
+        } catch (error) {
+          reportWorkerAutomation(username, 'commandScheduler', 'error', String(error));
+        }
+      }
+    }
+  }, 1000);
+}
+
+function sendLobbyPostCommand(username, bot) {
+  const state = getState(username);
+  const postCmd = state.plugins?.autoLobby?.postCommand?.trim();
+  if (!postCmd || bots.get(username) !== bot) {
+    reportWorkerAutomation(username, 'autoLobby', 'idle', 'Tamamlandı.', true);
+    return;
+  }
+  setTimeout(() => {
+    if (bots.get(username) !== bot) return;
+    try {
+      const cmd = postCmd.slice(0, 128);
+      state.lastSentText = cmd;
+      bot.chat(cmd);
+      logLine(username, `Otomatik lobi komutu gönderildi: ${cmd}`);
+      reportWorkerAutomation(username, 'autoLobby', 'idle', 'Tamamlandı.', true);
+    } catch (error) {
+      reportWorkerAutomation(username, 'autoLobby', 'error', String(error));
+    }
+  }, 600);
+}
+
+async function handleLobbyWindowOpen(username, bot, win) {
+  const state = getState(username);
+  if (!state.lobbyPendingWindow || !win || bots.get(username) !== bot) return;
+  const cfg = state.plugins?.autoLobby;
+  if (!cfg?.enabled) { state.lobbyPendingWindow = false; return; }
+  state.lobbyPendingWindow = false;
+  let targetSlot = -1;
+  if (Number.isInteger(cfg.clickSlot) && cfg.clickSlot >= 0 && cfg.clickSlot < (win.slots?.length || 0)) {
+    targetSlot = cfg.clickSlot;
+  } else if (cfg.itemKeyword?.trim() && Array.isArray(win.slots)) {
+    const kw = cfg.itemKeyword.trim().toLowerCase();
+    targetSlot = win.slots.findIndex(item => {
+      if (!item) return false;
+      const serialized = serialize(item);
+      const hay = `${item.name || ''} ${serialized?.displayName || ''} ${serialized?.customName || ''}`.toLowerCase();
+      return hay.includes(kw);
+    });
+  }
+  if (targetSlot >= 0) {
+    try {
+      await bot.clickWindow(targetSlot, 0, 0);
+      logLine(username, `Lobi menüsünde slot ${targetSlot} tıklandı.`);
+    } catch (error) {
+      reportWorkerAutomation(username, 'autoLobby', 'error', String(error));
+    }
+  } else {
+    logLine(username, 'Lobi menüsünde hedef eşya/slot bulunamadı.');
+  }
+  sendLobbyPostCommand(username, bot);
+}
+
+function scheduleAutoLobby(username, bot) {
+  const state = getState(username);
+  if (state.lobbyTimer) { clearTimeout(state.lobbyTimer); state.lobbyTimer = null; }
+  const cfg = state.plugins?.autoLobby;
+  if (!cfg?.enabled) {
+    reportWorkerAutomation(username, 'autoLobby', 'idle');
+    return;
+  }
+  if (state.lobbyCompleted || bots.get(username) !== bot) return;
+  const delaySec = Math.max(1, Number(cfg.delaySeconds) || 4);
+  reportWorkerAutomation(username, 'autoLobby', 'waiting', `${delaySec} sn bekleniyor...`);
+  state.lobbyTimer = setTimeout(() => {
+    state.lobbyTimer = null;
+    if (bots.get(username) !== bot || !state.plugins?.autoLobby?.enabled || state.lobbyCompleted) return;
+    state.lobbyCompleted = true;
+    reportWorkerAutomation(username, 'autoLobby', 'running', 'Lobi yönlendirmesi çalışıyor...');
+    const needsWindow = cfg.clickSlot >= 0 || Boolean(cfg.itemKeyword?.trim());
+    if (cfg.hotbarSlot > 0) {
+      try {
+        if (typeof bot.setQuickBarSlot === 'function') bot.setQuickBarSlot(cfg.hotbarSlot - 1);
+        state.lobbyPendingWindow = needsWindow;
+        if (typeof bot.activateItem === 'function') bot.activateItem();
+        if (!needsWindow) {
+          sendLobbyPostCommand(username, bot);
+        } else {
+          setTimeout(() => {
+            if (state.lobbyPendingWindow && bots.get(username) === bot) {
+              state.lobbyPendingWindow = false;
+              sendLobbyPostCommand(username, bot);
+            }
+          }, 5000);
+        }
+      } catch (error) {
+        state.lobbyPendingWindow = false;
+        reportWorkerAutomation(username, 'autoLobby', 'error', String(error));
+      }
+    } else {
+      sendLobbyPostCommand(username, bot);
+    }
+  }, delaySec * 1000);
+}
+
 function loadExternalPlugins(username, bot) {
   const state = getState(username);
   const scripts = Array.isArray(state.plugins?.enabledScripts) ? state.plugins.enabledScripts : [];
@@ -827,14 +1105,24 @@ function cleanupPlugins(username, bot) {
   const state = pluginStates.get(username);
   if (!state) return;
   stopAfk(username, bot);
+  stopCommandScheduler(username);
   state.automation?.stop();
   state.automation = null;
+  state.automationStatuses = {};
+  state.workerStatuses = {};
+  state.schedulerLastRun = {};
+  state.lobbyCompleted = false;
+  state.lobbyPendingWindow = false;
   state.manualControls.clear();
   if (state.joinTimer) { clearTimeout(state.joinTimer); state.joinTimer = null; }
+  if (state.lobbyTimer) { clearTimeout(state.lobbyTimer); state.lobbyTimer = null; }
   if (state.moveTimer) { clearInterval(state.moveTimer); state.moveTimer = null; }
   if (state.invTimer) { clearTimeout(state.invTimer); state.invTimer = null; }
   state.parsedChatListeners = [];
   state.recentLines = [];
+  state.recentLoginLines = [];
+  state.lastAutoLoginAt = 0;
+  state.lastAutoAcceptAt = 0;
   state.lastWorldCenter = null;
   state.lastPoseSentAt = 0;
   state.lastWorldSentAt = 0;
@@ -967,11 +1255,25 @@ process.on('message', ({ action, bot, username, message, slot, requestId, click,
         status(username, 'connected');
         bindInventory();
         applyAntiAfk(username, instance);
+        applyCommandScheduler(username, instance);
         if (!pluginState.automation) {
           pluginState.automation = createAutomation(instance, {
             current,
             isManual: () => pluginState.manualControls.size > 0 || Boolean(pluginState.moveTimer),
-            report: automation => { if (current()) send({ type: 'automation', username, automation }); },
+            report: automation => {
+              if (current()) {
+                pluginState.automationStatuses = automation || {};
+                sendCombinedAutomation(username);
+              }
+            },
+            onPanicDisconnect: (reason, disableReconnect) => {
+              logLine(username, `Acil panik çıkışı: ${reason}`);
+              if (disableReconnect) send({ type: 'panic-disconnect', username, reason });
+              cleanupPlugins(username, instance);
+              bots.delete(username);
+              try { instance.quit(); } catch {}
+              status(username, 'disconnected', reason);
+            },
             enqueue: fn => {
               const operation = (queues.get(username) || Promise.resolve()).catch(() => {}).then(fn);
               queues.set(username, operation);
@@ -982,6 +1284,9 @@ process.on('message', ({ action, bot, username, message, slot, requestId, click,
         }
         pluginState.automation.update(pluginState.plugins);
         initPluginsOnce();
+        if (!pluginState.lobbyCompleted && !pluginState.lobbyTimer) {
+          scheduleAutoLobby(username, instance);
+        }
         sendPose(username, instance);
         sendWorld(username, instance);
       });
@@ -1010,10 +1315,11 @@ process.on('message', ({ action, bot, username, message, slot, requestId, click,
         if (!current()) return;
         sendPose(username, instance);
       });
-      instance.on('windowOpen', () => {
+      instance.on('windowOpen', win => {
         if (!current()) return;
         clearCursor(instance);
         inventory(username, instance);
+        void handleLobbyWindowOpen(username, instance, win);
       });
       instance.on('windowClose', () => {
         if (!current()) return;
@@ -1036,6 +1342,8 @@ process.on('message', ({ action, bot, username, message, slot, requestId, click,
           }
           instance.emit('mynbot:chat', parsed);
         }
+        handleAutoLogin(username, instance, msg);
+        handleAutoAccept(username, instance, msg, parsed);
         handleAutoChat(username, instance, msg, parsed);
       });
       instance.on('resourcePack', (arg1, arg2, arg3) => {
@@ -1079,7 +1387,17 @@ process.on('message', ({ action, bot, username, message, slot, requestId, click,
     state.plugins = plugins || null;
     if (pluginsDir) state.pluginsDir = pluginsDir;
     const instance = bots.get(username);
-    if (instance) { applyAntiAfk(username, instance); state.automation?.update(state.plugins); }
+    if (instance) {
+      applyAntiAfk(username, instance);
+      applyCommandScheduler(username, instance);
+      if (!state.plugins?.autoAccept?.enabled) reportWorkerAutomation(username, 'autoAccept', 'idle');
+      if (!state.plugins?.autoLobby?.enabled) {
+        if (state.lobbyTimer) { clearTimeout(state.lobbyTimer); state.lobbyTimer = null; }
+        state.lobbyPendingWindow = false;
+        reportWorkerAutomation(username, 'autoLobby', 'idle');
+      }
+      state.automation?.update(state.plugins);
+    }
   } else if (action === 'inventory-click') {
     const instance = bots.get(username);
     getState(username).automation?.manual();
@@ -1436,3 +1754,7 @@ process.on('disconnect', () => {
   }
   process.exit(0);
 });
+
+if (require.main !== module) {
+  module.exports = { handleAutoLogin, handleAutoAccept, applyCommandScheduler, stopCommandScheduler, scheduleAutoLobby, getState, cleanupPlugins, pluginStates, bots };
+}

@@ -55,11 +55,6 @@ async function add() {
       </div>
     </header>
     <section class="launcher-body">
-      <div class="intro">
-        <span class="eyebrow">{{ L('KENDİ DÜNYANI YÖNET', 'MANAGE YOUR WORLD') }}</span>
-        <h1>{{ L('Dünyan burada', 'Your world begins') }}<br>{{ L('başlıyor.', 'here.') }}</h1>
-        <p>{{ L('Yüksek performanslı Minecraft bot kontrol merkezi. Botlarını ekle, dünyana bağlan.', 'High-performance Minecraft bot control center. Add your bots, connect to your world.') }}</p>
-      </div>
       <section class="collection">
         <div class="section-heading">
           <h2>{{ L('Bot koleksiyonu', 'Bot Collection') }} <span class="count">{{ store.bots.length }}</span></h2>
@@ -85,7 +80,6 @@ async function add() {
             <AppIcon name="Plus" /> {{ saving ? L('Ekleniyor...', 'Adding...') : L('Bot ekle', 'Add Bot') }}
           </button>
         </form>
-        <p class="input-hint">{{ L('Bir isimle başla, sunucuyu panelinden seç.', 'Start with a name, configure server in bot panel.') }}</p>
         <BotList :trigger-error="text => message = text" />
         <p v-if="message || store.error" class="notice" role="alert">{{ message || store.error }}</p>
       </section>

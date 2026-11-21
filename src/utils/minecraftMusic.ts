@@ -28,6 +28,19 @@ export const currentTrackIndex = ref<number>(0);
 export const currentTrackName = ref<string>('Sweden (Calm)');
 export const shuffleEnabled = ref<boolean>(true);
 
+export const DEFAULT_MUSIC_VOLUME = 0.08;
+
+function loadInitialVolume(): number {
+  if (typeof localStorage === 'undefined') return DEFAULT_MUSIC_VOLUME;
+  const raw = localStorage.getItem('mynbot_music_volume');
+  if (raw === null) return DEFAULT_MUSIC_VOLUME;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return DEFAULT_MUSIC_VOLUME;
+  return Math.min(1, Math.max(0, parsed));
+}
+
+export const musicVolume = ref<number>(loadInitialVolume());
+
 export const musicMuted = ref<boolean>(
   typeof localStorage !== 'undefined' && localStorage.getItem('mynbot_music_muted') === '1'
 );
@@ -229,7 +242,7 @@ function getAudioContext(): AudioContext | null {
 
     // Master Gain
     masterGain = audioCtx.createGain();
-    masterGain.gain.setValueAtTime(0.24, audioCtx.currentTime);
+    masterGain.gain.setValueAtTime(Math.max(0.0001, musicVolume.value * 0.85), audioCtx.currentTime);
 
     // Uzaysal Ambiyans Yankısı (Reverb / Delay hattı)
     delayNode = audioCtx.createDelay(1.5);
@@ -465,7 +478,7 @@ export function scheduleCurrentTrack(): void {
   }
   if (masterGain) {
     masterGain.gain.cancelScheduledValues(ctx.currentTime);
-    masterGain.gain.setValueAtTime(0.24, ctx.currentTime);
+    masterGain.gain.setValueAtTime(Math.max(0.0001, musicVolume.value * 0.85), ctx.currentTime);
   }
   if (delayFeedback) {
     delayFeedback.gain.cancelScheduledValues(ctx.currentTime);
@@ -573,7 +586,7 @@ export async function playNextShuffledRealTrack(token: number): Promise<void> {
         if (!audioEl) {
           audioEl = new Audio();
         }
-        audioEl.volume = 0.28;
+        audioEl.volume = Math.min(1, Math.max(0, musicVolume.value));
         audioEl.src = currentBlobUrl;
         audioEl.onended = () => {
           if (musicPlaying.value && !musicMuted.value) {
@@ -624,6 +637,34 @@ export function stopMusic(): void {
   stopSynthOnly();
 }
 
+export function setMusicVolume(val: number): void {
+  const clamped = Math.min(1, Math.max(0, Number.isFinite(val) ? val : DEFAULT_MUSIC_VOLUME));
+  musicVolume.value = clamped;
+  if (typeof localStorage !== 'undefined') {
+    localStorage.setItem('mynbot_music_volume', String(clamped));
+  }
+  if (audioEl) {
+    audioEl.volume = clamped;
+  }
+  if (masterGain && audioCtx) {
+    masterGain.gain.cancelScheduledValues(audioCtx.currentTime);
+    masterGain.gain.setValueAtTime(Math.max(0.0001, clamped * 0.85), audioCtx.currentTime);
+  }
+  if (clamped === 0 && !musicMuted.value) {
+    musicMuted.value = true;
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem('mynbot_music_muted', '1');
+    }
+    stopMusic();
+  } else if (clamped > 0 && musicMuted.value) {
+    musicMuted.value = false;
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem('mynbot_music_muted', '0');
+    }
+    startMusic();
+  }
+}
+
 export function toggleMusic(): boolean {
   if (!musicMuted.value) {
     musicMuted.value = true;
@@ -632,6 +673,10 @@ export function toggleMusic(): boolean {
     }
     stopMusic();
   } else {
+    if (musicVolume.value <= 0) {
+      setMusicVolume(DEFAULT_MUSIC_VOLUME);
+      return true;
+    }
     musicMuted.value = false;
     if (typeof localStorage !== 'undefined') {
       localStorage.setItem('mynbot_music_muted', '0');
@@ -718,6 +763,8 @@ export function useMinecraftMusic() {
   return {
     musicPlaying,
     musicMuted,
+    musicVolume,
+    setMusicVolume,
     shuffleEnabled,
     currentTrackIndex,
     currentTrackName,

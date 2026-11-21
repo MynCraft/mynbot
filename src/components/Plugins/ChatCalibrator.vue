@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import type { ChatPatternRule, ChatPatternType } from '../../types/bot';
+import type { ChatEntry, ChatPatternRule, ChatPatternType } from '../../types/bot';
 import { buildChatPattern, testChatPattern } from '../../utils/chatPatternBuilder';
 import { useBotStore } from '../../store/botStore';
 import { useI18n } from '../../i18n';
@@ -11,7 +11,8 @@ const emit = defineEmits<{ add: [rule: ChatPatternRule]; remove: [id: string] }>
 const store = useBotStore();
 const { L } = useI18n();
 
-const recentChat = computed(() => (store.data[props.username]?.chat || []).slice(-25).map(entry => entry.text));
+const recentEntries = computed<ChatEntry[]>(() => (store.data[props.username]?.chat || []).slice(-25));
+const recentChat = computed(() => recentEntries.value.map(entry => entry.text.trim()));
 const selectedIndices = ref<number[]>([]);
 const patternType = ref<ChatPatternType>('pm');
 const patternName = ref('');
@@ -107,15 +108,29 @@ function savePattern() {
         <span>{{ L('Anlık Sohbetten Satır Seç', 'Select Lines from Live Chat') }} ({{ selectedLines.length }} {{ L('satır seçili', 'lines selected') }})</span>
         <button v-if="selectedLines.length" type="button" class="secondary compact" @click="selectedIndices = []">{{ L('Seçimi temizle', 'Clear selection') }}</button>
       </div>
-      <div v-if="recentChat.length" class="calibrator-lines">
+      <div v-if="recentEntries.length" class="calibrator-lines mc-chat-output">
         <label
-          v-for="(line, index) in recentChat"
-          :key="`${index}-${line.slice(0, 16)}`"
+          v-for="(entry, index) in recentEntries"
+          :key="`${index}-${entry.text.slice(0, 16)}`"
           class="calibrator-line"
-          :class="{ chosen: selectedIndices.includes(index), magic: magicCode && line.includes(magicCode) }"
+          :class="{ chosen: selectedIndices.includes(index), magic: magicCode && entry.text.includes(magicCode) }"
         >
           <input type="checkbox" :checked="selectedIndices.includes(index)" @change="toggleLine(index)" />
-          <span>{{ line }}</span>
+          <span class="calibrator-line-text">
+            <template v-if="entry.segments?.length">
+              <span
+                v-for="(seg, j) in entry.segments"
+                :key="j"
+                :style="{
+                  color: seg.color || '#ffffff',
+                  fontWeight: seg.bold ? 'bold' : undefined,
+                  fontStyle: seg.italic ? 'italic' : undefined,
+                  textDecoration: [seg.underlined ? 'underline' : '', seg.strikethrough ? 'line-through' : ''].filter(Boolean).join(' ') || undefined
+                }"
+              >{{ j === 0 ? seg.text.trimStart() : seg.text }}</span>
+            </template>
+            <template v-else>{{ entry.text.trimStart() }}</template>
+          </span>
         </label>
       </div>
       <p v-else class="empty-copy">

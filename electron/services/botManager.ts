@@ -107,6 +107,7 @@ export class BotManager {
         type: string;
         username: string;
         state: BotStatus['state'];
+        reason?: string;
         message?: string;
         text?: string;
         url?: string;
@@ -160,6 +161,10 @@ export class BotManager {
         if (!list.includes(msg.url)) data.resourcePacks = [...list, msg.url];
       } else if (msg.type === 'log' && msg.message) {
         this.pushLog(msg.username, msg.message);
+      } else if (msg.type === 'panic-disconnect') {
+        this.manualDisconnects.add(msg.username);
+        this.clearReconnect(msg.username);
+        this.pushLog(msg.username, `Acil panik çıkışı (${msg.reason || 'Tetiklendi'}): Otomatik yeniden bağlanma durduruldu.`);
       } else if (msg.type === 'operation-error') {
         this.pushLog(msg.username, msg.message || 'İşlem başarısız');
         this.statuses[msg.username] = { ...this.statuses[msg.username], message: msg.message };

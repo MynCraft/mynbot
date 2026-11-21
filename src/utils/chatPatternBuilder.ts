@@ -1,4 +1,4 @@
-import type { ChatPatternRule, ChatPatternType } from '../types/bot';
+import type { ChatPatternRule, ChatPatternType, LoginPatternAction, LoginPatternRule } from '../types/bot';
 
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -145,4 +145,74 @@ export function testChatPattern(rule: ChatPatternRule, lines: string[]): {
   }
 
   return { matched: Boolean(message), sender, message };
+}
+
+function escapeFlex(value: string): string {
+  return escapeRegex(value)
+    .replace(/\d+/g, '\\d+')
+    .replace(/(\\\s|\s)+/g, '\\s+');
+}
+
+function buildLoginLineRegex(line: string, triggerText: string): string {
+  const trimmed = line.trim();
+  if (!trimmed || /^[-=~_*•·+|<>#.\s]+$/.test(trimmed)) {
+    return buildDecorativeLine(line);
+  }
+  if (triggerText && trimmed.toLowerCase().includes(triggerText.toLowerCase())) {
+    return `^.*${escapeFlex(triggerText)}.*$`;
+  }
+  return `^\\s*${escapeFlex(trimmed)}\\s*$`;
+}
+
+export function buildLoginPattern(input: {
+  lines: string[];
+  triggerText?: string;
+  action: LoginPatternAction;
+  name?: string;
+}): { rule?: LoginPatternRule; error?: string } {
+  const lines = input.lines.slice(0, 8).map(l => l.trimEnd());
+  const triggerText = (input.triggerText || '').trim();
+  const action: LoginPatternAction = input.action === 'register' ? 'register' : 'login';
+
+  if (!lines.length) return { error: 'En az 1 sohbet satırı seçin.' };
+
+  if (triggerText) {
+    const lowerTrigger = triggerText.toLowerCase();
+    const hasTrigger = lines.some(line => line.toLowerCase().includes(lowerTrigger));
+    if (!hasTrigger) {
+      return { error: 'Girdiğiniz anahtar ibare seçilen satırların hiçbirinde bulunamadı.' };
+    }
+  }
+
+  const regexLines = lines.map(line => buildLoginLineRegex(line, triggerText));
+  const defaultName = action === 'register' ? 'Kayıt Mesajı' : 'Giriş Mesajı';
+
+  const rule: LoginPatternRule = {
+    id: `lpat-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    name: input.name?.trim() || `${defaultName}${lines.length > 1 ? ` (${lines.length} satır)` : ''}`,
+    action,
+    lineCount: lines.length,
+    regexLines,
+    ...(triggerText ? { triggerText } : {}),
+    sampleLines: lines,
+  };
+
+  return { rule };
+}
+
+export function testLoginPattern(rule: LoginPatternRule, lines: string[]): {
+  matched: boolean;
+  action: LoginPatternAction;
+} {
+  if (lines.length < rule.lineCount || rule.lineCount <= 0) {
+    return { matched: false, action: rule.action };
+  }
+  const slice = lines.slice(lines.length - rule.lineCount);
+  for (let i = 0; i < rule.lineCount; i++) {
+    let re: RegExp;
+    try { re = new RegExp(rule.regexLines[i], 'i'); }
+    catch { return { matched: false, action: rule.action }; }
+    if (!re.test(slice[i])) return { matched: false, action: rule.action };
+  }
+  return { matched: true, action: rule.action };
 }

@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
-import type { BotPluginSettings, ChatPatternRule } from '../../types/bot';
+import type { BotPluginSettings, ChatPatternRule, LoginPatternRule } from '../../types/bot';
 import { useI18n } from '../../i18n';
 import ChatCalibrator from './ChatCalibrator.vue';
+import LoginCalibrator from './LoginCalibrator.vue';
 import PluginIcon from './PluginIcon.vue';
 import AppIcon from '../ui/AppIcon.vue';
 
@@ -24,8 +25,12 @@ const emit = defineEmits<{
   toggle: [];
   addRule: [];
   removeRule: [index: number];
+  addScheduledTask: [];
+  removeScheduledTask: [index: number];
   addPattern: [rule: ChatPatternRule];
   removePattern: [id: string];
+  addLoginPattern: [rule: LoginPatternRule];
+  removeLoginPattern: [id: string];
   deleteScript: [filename: string];
   setIcon: [icon: string | null];
 }>();
@@ -34,6 +39,7 @@ const { L, t } = useI18n();
 const showIconPicker = ref(false);
 const customUrlInput = ref('');
 const iconError = ref('');
+const showPassword = ref(false);
 
 const ITEM_ICON_PRESETS = [
   'item:ender_pearl',
@@ -54,12 +60,13 @@ const ITEM_ICON_PRESETS = [
   'item:experience_bottle',
 ];
 
-const ICON_PRESETS = ['RefreshCw', 'Footprints', 'MessageSquare', 'Target', 'BookOpen', 'Drumstick', 'Swords', 'Shield', 'Zap', 'Bot', 'Info', 'Settings'];
+const ICON_PRESETS = ['RefreshCw', 'Footprints', 'MessageSquare', 'KeyRound', 'Lock', 'Target', 'BookOpen', 'Drumstick', 'Swords', 'Shield', 'Zap', 'Bot', 'Info', 'Settings'];
 
 watch(() => props.moduleId, () => {
   showIconPicker.value = false;
   customUrlInput.value = '';
   iconError.value = '';
+  showPassword.value = false;
 });
 
 const currentIcon = computed(() => {
@@ -75,11 +82,43 @@ const isEnabled = computed(() => {
   if (props.moduleId === 'autoEat') return props.draft.autoEat.enabled;
   if (props.moduleId === 'autoArmor') return props.draft.autoArmor.enabled;
   if (props.moduleId === 'autoFishing') return props.draft.autoFishing.enabled;
+  if (props.moduleId === 'autoTotem') return props.draft.autoTotem.enabled;
+  if (props.moduleId === 'autoPanic') return props.draft.autoPanic.enabled;
+  if (props.moduleId === 'autoDefend') return props.draft.autoDefend.enabled;
+  if (props.moduleId === 'autoLobby') return props.draft.autoLobby.enabled;
+  if (props.moduleId === 'autoAccept') return props.draft.autoAccept.enabled;
+  if (props.moduleId === 'commandScheduler') return props.draft.commandScheduler.enabled;
+  if (props.moduleId === 'autoChestDump') return props.draft.autoChestDump.enabled;
   if (props.moduleId === 'autoReconnect') return props.draft.autoReconnect.enabled;
   if (props.moduleId === 'antiAfk') return props.draft.antiAfk.enabled;
   if (props.moduleId === 'autoChat') return props.draft.autoChat.enabled;
+  if (props.moduleId === 'autoLogin') return props.draft.autoLogin.enabled;
   if (isScript.value) return props.draft.enabledScripts.includes(scriptFilename.value);
   return true;
+});
+
+function parseCsvList(value: string, maxItems: number, maxLen: number): string[] {
+  return value.split(',').map(s => s.trim().slice(0, maxLen)).filter(Boolean).slice(0, maxItems);
+}
+
+const panicWhitelistText = computed({
+  get: () => props.draft.autoPanic.whitelist.join(', '),
+  set: (v: string) => { props.draft.autoPanic.whitelist = parseCsvList(v, 30, 32); },
+});
+
+const acceptWhitelistText = computed({
+  get: () => props.draft.autoAccept.whitelist.join(', '),
+  set: (v: string) => { props.draft.autoAccept.whitelist = parseCsvList(v, 30, 32); },
+});
+
+const acceptTriggersText = computed({
+  get: () => props.draft.autoAccept.triggers.join(', '),
+  set: (v: string) => { props.draft.autoAccept.triggers = parseCsvList(v, 20, 64); },
+});
+
+const chestKeepKeywordsText = computed({
+  get: () => props.draft.autoChestDump.keepKeywords.join(', '),
+  set: (v: string) => { props.draft.autoChestDump.keepKeywords = parseCsvList(v, 20, 64); },
 });
 
 const hasToggle = computed(() => props.moduleId !== 'chatCalibrator');
@@ -288,6 +327,177 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
             </div>
           </template>
 
+          <template v-else-if="moduleId === 'autoTotem'">
+            <p class="plugins-note">{{ t('plugins.autoTotem.description') }}</p>
+            <div class="fields">
+              <div>
+                <label for="totem-priority">{{ t('plugins.autoTotem.priorityItem') }}</label>
+                <select id="totem-priority" v-model="draft.autoTotem.priorityItem">
+                  <option value="totem">{{ t('plugins.autoTotem.totem') }}</option>
+                  <option value="shield">{{ t('plugins.autoTotem.shield') }}</option>
+                </select>
+              </div>
+              <div>
+                <label for="totem-health">{{ t('plugins.autoTotem.healthThreshold') }}</label>
+                <input id="totem-health" v-model.number="draft.autoTotem.healthThreshold" type="number" min="1" max="20" />
+              </div>
+              <div>
+                <label for="totem-interval">{{ t('plugins.autoTotem.interval') }}</label>
+                <input id="totem-interval" v-model.number="draft.autoTotem.intervalSeconds" type="number" min="1" max="30" />
+              </div>
+            </div>
+          </template>
+
+          <template v-else-if="moduleId === 'autoPanic'">
+            <p class="plugins-note">{{ t('plugins.autoPanic.description') }}</p>
+            <div class="fields">
+              <div>
+                <label for="panic-health">{{ t('plugins.autoPanic.healthThreshold') }}</label>
+                <input id="panic-health" v-model.number="draft.autoPanic.healthThreshold" type="number" min="1" max="19" />
+              </div>
+              <div>
+                <label for="panic-action">{{ t('plugins.autoPanic.action') }}</label>
+                <select id="panic-action" v-model="draft.autoPanic.action">
+                  <option value="disconnect">{{ t('plugins.autoPanic.actionDisconnect') }}</option>
+                  <option value="command">{{ t('plugins.autoPanic.actionCommand') }}</option>
+                </select>
+              </div>
+              <div v-if="draft.autoPanic.action === 'command'">
+                <label for="panic-cmd">{{ t('plugins.autoPanic.panicCommand') }}</label>
+                <input id="panic-cmd" v-model="draft.autoPanic.panicCommand" maxlength="128" placeholder="/spawn" />
+              </div>
+              <div>
+                <label for="panic-radius">{{ t('plugins.autoPanic.playerRadius') }}</label>
+                <input id="panic-radius" v-model.number="draft.autoPanic.playerRadius" type="number" min="3" max="32" />
+              </div>
+              <div>
+                <label for="panic-whitelist">{{ t('plugins.autoPanic.whitelist') }}</label>
+                <input id="panic-whitelist" v-model="panicWhitelistText" placeholder="Arkadas1, Arkadas2" />
+              </div>
+              <div class="checkbox-stack">
+                <label class="check-item"><input v-model="draft.autoPanic.disconnectOnPlayer" type="checkbox" /> {{ t('plugins.autoPanic.disconnectOnPlayer') }}</label>
+                <label class="check-item"><input v-model="draft.autoPanic.disableReconnect" type="checkbox" /> {{ t('plugins.autoPanic.disableReconnect') }}</label>
+              </div>
+            </div>
+          </template>
+
+          <template v-else-if="moduleId === 'autoDefend'">
+            <p class="plugins-note">{{ t('plugins.autoDefend.description') }}</p>
+            <div class="fields">
+              <div>
+                <label for="defend-radius">{{ t('plugins.autoDefend.radius') }}</label>
+                <input id="defend-radius" v-model.number="draft.autoDefend.radius" type="number" min="2" max="6" />
+              </div>
+              <div>
+                <label for="defend-interval">{{ t('plugins.autoDefend.attackInterval') }}</label>
+                <input id="defend-interval" v-model.number="draft.autoDefend.attackIntervalMs" type="number" min="300" max="2000" />
+              </div>
+              <div class="checkbox-stack">
+                <label class="check-item"><input v-model="draft.autoDefend.autoEquipWeapon" type="checkbox" /> {{ t('plugins.autoDefend.autoEquipWeapon') }}</label>
+                <label class="check-item"><input v-model="draft.autoDefend.attackCreepers" type="checkbox" /> {{ t('plugins.autoDefend.attackCreepers') }}</label>
+                <label class="check-item"><input v-model="draft.autoDefend.restoreHeldItem" type="checkbox" /> {{ t('plugins.autoDefend.restoreHeldItem') }}</label>
+              </div>
+            </div>
+          </template>
+
+          <template v-else-if="moduleId === 'autoLobby'">
+            <p class="plugins-note">{{ t('plugins.autoLobby.description') }}</p>
+            <div class="fields">
+              <div>
+                <label for="lobby-delay">{{ t('plugins.autoLobby.delay') }}</label>
+                <input id="lobby-delay" v-model.number="draft.autoLobby.delaySeconds" type="number" min="1" max="30" />
+              </div>
+              <div>
+                <label for="lobby-hotbar">{{ t('plugins.autoLobby.hotbarSlot') }}</label>
+                <input id="lobby-hotbar" v-model.number="draft.autoLobby.hotbarSlot" type="number" min="0" max="9" />
+              </div>
+              <div>
+                <label for="lobby-click">{{ t('plugins.autoLobby.clickSlot') }}</label>
+                <input id="lobby-click" v-model.number="draft.autoLobby.clickSlot" type="number" min="-1" max="53" />
+              </div>
+              <div>
+                <label for="lobby-keyword">{{ t('plugins.autoLobby.itemKeyword') }}</label>
+                <input id="lobby-keyword" v-model="draft.autoLobby.itemKeyword" maxlength="64" placeholder="Skyblock" />
+              </div>
+              <div>
+                <label for="lobby-post">{{ t('plugins.autoLobby.postCommand') }}</label>
+                <input id="lobby-post" v-model="draft.autoLobby.postCommand" maxlength="128" placeholder="/is go" />
+              </div>
+            </div>
+          </template>
+
+          <template v-else-if="moduleId === 'autoAccept'">
+            <p class="plugins-note">{{ t('plugins.autoAccept.description') }}</p>
+            <div class="fields">
+              <div>
+                <label for="accept-cmd">{{ t('plugins.autoAccept.acceptCommand') }}</label>
+                <input id="accept-cmd" v-model="draft.autoAccept.acceptCommand" maxlength="128" placeholder="/tpaccept" />
+              </div>
+              <div>
+                <label for="accept-cooldown">{{ t('plugins.autoAccept.cooldown') }}</label>
+                <input id="accept-cooldown" v-model.number="draft.autoAccept.cooldownSeconds" type="number" min="1" max="60" />
+              </div>
+              <div>
+                <label for="accept-whitelist">{{ t('plugins.autoAccept.whitelist') }}</label>
+                <input id="accept-whitelist" v-model="acceptWhitelistText" placeholder="Arkadas1, Arkadas2" />
+              </div>
+              <div>
+                <label for="accept-triggers">{{ t('plugins.autoAccept.triggers') }}</label>
+                <input id="accept-triggers" v-model="acceptTriggersText" placeholder="ışınlanma isteği, tpa, teleport" />
+              </div>
+              <div class="checkbox-stack">
+                <label class="check-item"><input v-model="draft.autoAccept.onlyWhitelist" type="checkbox" /> {{ t('plugins.autoAccept.onlyWhitelist') }}</label>
+              </div>
+            </div>
+          </template>
+
+          <template v-else-if="moduleId === 'commandScheduler'">
+            <p class="plugins-note">{{ t('plugins.commandScheduler.description') }}</p>
+            <div class="rules-section">
+              <div class="rules-head">
+                <span>{{ t('plugins.commandScheduler.title') }} ({{ draft.commandScheduler.tasks.length }}/20)</span>
+                <button type="button" class="secondary compact" :disabled="draft.commandScheduler.tasks.length >= 20" @click="emit('addScheduledTask')">
+                  {{ t('plugins.commandScheduler.addTask') }}
+                </button>
+              </div>
+              <div v-for="(task, index) in draft.commandScheduler.tasks" :key="task.id" class="rule-row">
+                <label class="check-item"><input v-model="task.enabled" type="checkbox" /></label>
+                <input v-model="task.command" maxlength="256" :placeholder="L('Örn: /sell all', 'e.g. /sell all')" />
+                <input v-model.number="task.intervalSeconds" type="number" min="5" max="86400" :aria-label="L('Süre (sn)', 'Interval (sec)')" />
+                <button type="button" class="delete-bot" :title="L('Görevi sil', 'Delete task')" :aria-label="L('Görevi sil', 'Delete task')" @click="emit('removeScheduledTask', index)"><AppIcon name="Trash2" :size="15" /></button>
+              </div>
+              <p v-if="!draft.commandScheduler.tasks.length" class="empty-copy">
+                {{ t('plugins.commandScheduler.empty') }}
+              </p>
+            </div>
+          </template>
+
+          <template v-else-if="moduleId === 'autoChestDump'">
+            <p class="plugins-note">{{ t('plugins.autoChestDump.description') }}</p>
+            <div class="fields">
+              <div>
+                <label for="chest-free">{{ t('plugins.autoChestDump.freeSlotsThreshold') }}</label>
+                <input id="chest-free" v-model.number="draft.autoChestDump.freeSlotsThreshold" type="number" min="1" max="18" />
+              </div>
+              <div>
+                <label for="chest-radius">{{ t('plugins.autoChestDump.searchRadius') }}</label>
+                <input id="chest-radius" v-model.number="draft.autoChestDump.searchRadius" type="number" min="2" max="5" />
+              </div>
+              <div>
+                <label for="chest-interval">{{ t('plugins.autoChestDump.interval') }}</label>
+                <input id="chest-interval" v-model.number="draft.autoChestDump.intervalSeconds" type="number" min="5" max="120" />
+              </div>
+              <div>
+                <label for="chest-keywords">{{ t('plugins.autoChestDump.keepKeywords') }}</label>
+                <input id="chest-keywords" v-model="chestKeepKeywordsText" placeholder="diamond, nether_star" />
+              </div>
+              <div class="checkbox-stack">
+                <label class="check-item"><input v-model="draft.autoChestDump.keepFoods" type="checkbox" /> {{ t('plugins.autoChestDump.keepFoods') }}</label>
+                <label class="check-item"><input v-model="draft.autoChestDump.keepToolsAndArmor" type="checkbox" /> {{ t('plugins.autoChestDump.keepToolsAndArmor') }}</label>
+              </div>
+            </div>
+          </template>
+
           <!-- Auto Reconnect -->
           <template v-if="moduleId === 'autoReconnect'">
             <div class="fields">
@@ -348,6 +558,57 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
               <p v-if="!draft.autoChat.rules.length" class="empty-copy">
                 {{ L('Henüz otomatik yanıt kuralı eklenmedi. Yanıtlarda {sender}, {message}, {username} kullanabilirsin.', 'No auto-response rules added yet. You can use {sender}, {message}, {username} in responses.') }}
               </p>
+            </div>
+          </template>
+
+          <!-- Auto Login -->
+          <template v-else-if="moduleId === 'autoLogin'">
+            <p class="plugins-note">{{ t('plugins.autoLogin.description') }}</p>
+            <div class="fields">
+              <div>
+                <label for="login-password">{{ t('plugins.autoLogin.password') }}</label>
+                <div class="password-input-row">
+                  <input
+                    id="login-password"
+                    v-model="draft.autoLogin.password"
+                    :type="showPassword ? 'text' : 'password'"
+                    maxlength="128"
+                    autocomplete="off"
+                    :placeholder="t('plugins.autoLogin.passwordPlaceholder')"
+                  />
+                  <button
+                    type="button"
+                    class="secondary compact password-toggle-btn"
+                    :title="showPassword ? t('plugins.autoLogin.hidePassword') : t('plugins.autoLogin.showPassword')"
+                    :aria-label="showPassword ? t('plugins.autoLogin.hidePassword') : t('plugins.autoLogin.showPassword')"
+                    @click="showPassword = !showPassword"
+                  >
+                    <AppIcon :name="showPassword ? 'EyeOff' : 'Eye'" :size="15" />
+                  </button>
+                </div>
+              </div>
+              <div>
+                <label for="login-cooldown">{{ t('plugins.autoLogin.cooldown') }}</label>
+                <input id="login-cooldown" v-model.number="draft.autoLogin.cooldownSeconds" type="number" min="1" max="60" />
+              </div>
+              <div>
+                <label for="login-cmd">{{ t('plugins.autoLogin.loginCommand') }}</label>
+                <input id="login-cmd" v-model="draft.autoLogin.loginCommand" maxlength="256" placeholder="/login {password}" />
+                <small>{{ t('plugins.autoLogin.commandHelp') }}</small>
+              </div>
+              <div>
+                <label for="register-cmd">{{ t('plugins.autoLogin.registerCommand') }}</label>
+                <input id="register-cmd" v-model="draft.autoLogin.registerCommand" maxlength="256" placeholder="/register {password} {password}" />
+              </div>
+            </div>
+            <div class="login-calibrator-wrap">
+              <LoginCalibrator
+                :username="username"
+                :connected="connected"
+                :patterns="draft.autoLogin.patterns"
+                @add="rule => emit('addLoginPattern', rule)"
+                @remove="id => emit('removeLoginPattern', id)"
+              />
             </div>
           </template>
 
@@ -566,13 +827,13 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
   flex-direction: column;
   gap: 14px;
 }
-.plugin-modal-card .fields > div > label:not(.check-item) {
+.plugin-modal-card :deep(.fields > div > label:not(.check-item)) {
   display: block;
   margin-bottom: 6px;
   color: #cbd5e1;
   font-size: 12px;
 }
-.plugin-modal-card .fields select {
+.plugin-modal-card :deep(.fields select) {
   width: 100%;
   min-width: 0;
   padding: 12px 13px;
@@ -583,12 +844,12 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
   font: inherit;
   font-size: 13px;
 }
-.plugin-modal-card .fields select:focus-visible {
+.plugin-modal-card :deep(.fields select:focus-visible) {
   outline: 2px solid var(--accent, #b9f477);
   outline-offset: 2px;
   border-color: rgba(185, 244, 119, 0.55);
 }
-.plugin-modal-card .fields small {
+.plugin-modal-card :deep(.fields small) {
   display: block;
   margin-top: 6px;
   color: #94a3b8;
@@ -623,6 +884,25 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
 .delete-script-btn:hover:not(:disabled) {
   background: rgba(239, 68, 68, 0.3);
   color: #fff;
+}
+.password-input-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.password-input-row input {
+  flex: 1;
+  min-width: 0;
+}
+.password-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 7px 10px;
+  flex-shrink: 0;
+}
+.login-calibrator-wrap {
+  margin-top: 16px;
 }
 .plugin-modal-foot {
   display: flex;

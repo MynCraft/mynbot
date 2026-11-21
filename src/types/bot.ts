@@ -38,18 +38,115 @@ export interface AutoChatSettings {
   rules: AutoChatRule[];
 }
 
+export type LoginPatternAction = 'login' | 'register';
+
+export interface LoginPatternRule {
+  id: string;
+  name: string;
+  action: LoginPatternAction;
+  lineCount: number;
+  regexLines: string[];
+  triggerText?: string;
+  sampleLines?: string[];
+}
+
+export interface AutoLoginSettings {
+  enabled: boolean;
+  password: string;
+  loginCommand: string;
+  registerCommand: string;
+  cooldownSeconds: number;
+  patterns: LoginPatternRule[];
+}
+
 export interface AutoEatSettings { enabled: boolean; hungerThreshold: number; healthThreshold: number; selection: 'saturation' | 'food'; allowGoldenApples: boolean; restoreHeldItem: boolean }
 export interface AutoArmorSettings { enabled: boolean; intervalSeconds: number }
 export interface AutoFishingSettings { enabled: boolean; recastDelaySeconds: number; timeoutSeconds: number }
+
+export interface AutoTotemSettings {
+  enabled: boolean;
+  priorityItem: 'totem' | 'shield';
+  healthThreshold: number;
+  intervalSeconds: number;
+}
+
+export interface AutoPanicSettings {
+  enabled: boolean;
+  healthThreshold: number;
+  disconnectOnPlayer: boolean;
+  playerRadius: number;
+  whitelist: string[];
+  action: 'disconnect' | 'command';
+  panicCommand: string;
+  disableReconnect: boolean;
+}
+
+export interface AutoDefendSettings {
+  enabled: boolean;
+  radius: number;
+  attackIntervalMs: number;
+  autoEquipWeapon: boolean;
+  attackCreepers: boolean;
+  restoreHeldItem: boolean;
+}
+
+export interface AutoLobbySettings {
+  enabled: boolean;
+  delaySeconds: number;
+  hotbarSlot: number;
+  clickSlot: number;
+  itemKeyword: string;
+  postCommand: string;
+}
+
+export interface AutoAcceptSettings {
+  enabled: boolean;
+  onlyWhitelist: boolean;
+  whitelist: string[];
+  triggers: string[];
+  acceptCommand: string;
+  cooldownSeconds: number;
+}
+
+export interface ScheduledCommandTask {
+  id: string;
+  command: string;
+  intervalSeconds: number;
+  enabled: boolean;
+}
+
+export interface CommandSchedulerSettings {
+  enabled: boolean;
+  tasks: ScheduledCommandTask[];
+}
+
+export interface AutoChestDumpSettings {
+  enabled: boolean;
+  freeSlotsThreshold: number;
+  searchRadius: number;
+  intervalSeconds: number;
+  keepFoods: boolean;
+  keepToolsAndArmor: boolean;
+  keepKeywords: string[];
+}
+
 export interface AutomationStatus { state: 'idle' | 'waiting' | 'running' | 'error'; message?: string; lastRunAt?: number }
 
 export interface BotPluginSettings {
   autoEat: AutoEatSettings;
   autoArmor: AutoArmorSettings;
   autoFishing: AutoFishingSettings;
+  autoTotem: AutoTotemSettings;
+  autoPanic: AutoPanicSettings;
+  autoDefend: AutoDefendSettings;
+  autoLobby: AutoLobbySettings;
+  autoAccept: AutoAcceptSettings;
+  commandScheduler: CommandSchedulerSettings;
+  autoChestDump: AutoChestDumpSettings;
   autoReconnect: AutoReconnectSettings;
   antiAfk: AntiAfkSettings;
   autoChat: AutoChatSettings;
+  autoLogin: AutoLoginSettings;
   chatPatterns: ChatPatternRule[];
   enabledScripts: string[];
   moduleIcons?: Record<string, string>;
@@ -66,9 +163,17 @@ export function defaultPluginSettings(): BotPluginSettings {
     autoEat: { enabled: false, hungerThreshold: 16, healthThreshold: 10, selection: 'saturation', allowGoldenApples: false, restoreHeldItem: true },
     autoArmor: { enabled: false, intervalSeconds: 10 },
     autoFishing: { enabled: false, recastDelaySeconds: 2, timeoutSeconds: 60 },
+    autoTotem: { enabled: false, priorityItem: 'totem', healthThreshold: 12, intervalSeconds: 1 },
+    autoPanic: { enabled: false, healthThreshold: 6, disconnectOnPlayer: false, playerRadius: 12, whitelist: [], action: 'disconnect', panicCommand: '/spawn', disableReconnect: true },
+    autoDefend: { enabled: false, radius: 4, attackIntervalMs: 650, autoEquipWeapon: true, attackCreepers: false, restoreHeldItem: true },
+    autoLobby: { enabled: false, delaySeconds: 4, hotbarSlot: 0, clickSlot: -1, itemKeyword: '', postCommand: '' },
+    autoAccept: { enabled: false, onlyWhitelist: true, whitelist: [], triggers: ['ışınlanma isteği', 'sana ışınlanmak', 'teleport request', '/tpaccept'], acceptCommand: '/tpaccept', cooldownSeconds: 3 },
+    commandScheduler: { enabled: false, tasks: [] },
+    autoChestDump: { enabled: false, freeSlotsThreshold: 3, searchRadius: 4, intervalSeconds: 15, keepFoods: true, keepToolsAndArmor: true, keepKeywords: [] },
     autoReconnect: { enabled: false, delaySeconds: 5, maxAttempts: 5 },
     antiAfk: { enabled: false, intervalSeconds: 30, jump: true, rotate: true },
     autoChat: { enabled: false, joinMessage: '', cooldownSeconds: 3, rules: [] },
+    autoLogin: { enabled: false, password: '', loginCommand: '/login {password}', registerCommand: '/register {password} {password}', cooldownSeconds: 5, patterns: [] },
     chatPatterns: [],
     enabledScripts: [],
     moduleIcons: {},
