@@ -56,6 +56,7 @@ export interface AutoLoginSettings {
   loginCommand: string;
   registerCommand: string;
   cooldownSeconds: number;
+  listenTitleActionbar: boolean;
   patterns: LoginPatternRule[];
 }
 
@@ -173,7 +174,7 @@ export function defaultPluginSettings(): BotPluginSettings {
     autoReconnect: { enabled: false, delaySeconds: 5, maxAttempts: 5 },
     antiAfk: { enabled: false, intervalSeconds: 30, jump: true, rotate: true },
     autoChat: { enabled: false, joinMessage: '', cooldownSeconds: 3, rules: [] },
-    autoLogin: { enabled: false, password: '', loginCommand: '/login {password}', registerCommand: '/register {password} {password}', cooldownSeconds: 5, patterns: [] },
+    autoLogin: { enabled: false, password: '', loginCommand: '/login {password}', registerCommand: '/register {password} {password}', cooldownSeconds: 5, listenTitleActionbar: true, patterns: [] },
     chatPatterns: [],
     enabledScripts: [],
     moduleIcons: {},
@@ -198,7 +199,18 @@ export interface ChatSegment {
 }
 
 export interface ChatEntry {
+  id?: string;
   text: string;
+  segments?: ChatSegment[];
+}
+
+export type LoginPromptSource = 'chat' | 'title' | 'subtitle' | 'actionbar';
+
+export interface LoginPromptEntry {
+  id: string;
+  text: string;
+  source: LoginPromptSource;
+  at: number;
   segments?: ChatSegment[];
 }
 
@@ -281,6 +293,8 @@ export interface BotData {
   slotCount: number;
   selectedSlot: number;
   chat: ChatEntry[];
+  loginPrompts?: LoginPromptEntry[];
+  lastActionbar?: string;
   logs: string[];
   resourcePacks?: string[];
   pose?: BotPose;

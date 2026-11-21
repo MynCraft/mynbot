@@ -11,6 +11,7 @@ const appRequire = Module.createRequire(path.join(appRoot, 'package.json'));
 const mineflayer = require('mineflayer');
 const mc = require('minecraft-protocol');
 const mcData = require('minecraft-data');
+const prismarineRegistry = appRequire('prismarine-registry');
 const Vec3 = require('vec3');
 const { createAutomation } = require('./builtin-automation.cjs');
 
@@ -18,6 +19,8 @@ const bots = new Map();
 const queues = new Map();
 const pluginStates = new Map();
 const connectTokens = new Map();
+const activeSessionIds = new Map();
+const botConnectionStates = new Map();
 const TESTED_VERSION_SET = new Set(mineflayer.testedVersions || []);
 const PLUGIN_NAME_RE = /^[a-zA-Z0-9._-]+\.(cjs|js)$/;
 
@@ -41,6 +44,23 @@ function stripPua(text) {
   return String(text || '').replace(PUA_RE, '').replace(/\s{2,}/g, ' ').trimStart();
 }
 
+function formatTranslateText(template, withParts) {
+  if (!Array.isArray(withParts) || !withParts.length) return template;
+  if (template === 'chat.type.text' && withParts.length >= 2) {
+    return `<${withParts[0]}> ${withParts[1]}`;
+  }
+  if (/%(?:\d+\$)?s/.test(template)) {
+    let idx = 0;
+    return template
+      .replace(/%%|%(\d+)\$s|%s/g, (full, pos) => {
+        if (full === '%%') return '%';
+        const argIdx = pos ? Number(pos) - 1 : idx++;
+        return withParts[argIdx] !== undefined ? withParts[argIdx] : '';
+      });
+  }
+  return `${template}${withParts.join('')}`;
+}
+
 function extractReasonText(node) {
   if (node == null) return '';
   if (typeof node === 'number' || typeof node === 'boolean') return String(node);
@@ -61,10 +81,19 @@ function extractReasonText(node) {
     if (node.type === 'string' && typeof node.value === 'string') return extractReasonText(node.value);
     if (node.value !== undefined && Object.keys(node).length <= 2 && node.type) return extractReasonText(node.value);
 
-    const head = node.text !== undefined ? extractReasonText(node.text) : (node.translate !== undefined ? extractReasonText(node.translate) : '');
-    const withPart = node.with ? extractReasonText(node.with) : '';
+    let head = '';
+    if (node.text !== undefined) {
+      head = extractReasonText(node.text);
+    } else if (node[''] !== undefined) {
+      head = extractReasonText(node['']);
+    } else if (node.translate !== undefined) {
+      const tpl = extractReasonText(node.translate);
+      const rawWith = node.with?.value || node.with;
+      const withArr = Array.isArray(rawWith) ? rawWith.map(extractReasonText) : (rawWith != null ? [extractReasonText(rawWith)] : []);
+      head = withArr.length ? formatTranslateText(tpl, withArr) : tpl;
+    }
     const tail = node.extra ? extractReasonText(node.extra) : '';
-    if (head || withPart || tail) return `${head}${withPart}${tail}`;
+    if (head || tail) return `${head}${tail}`;
     return '';
   }
   return '';
@@ -165,18 +194,25 @@ function parseChatToSegments(val, inheritedStyle = {}) {
     if (typeof rawStrikethrough === 'boolean') style.strikethrough = rawStrikethrough;
 
     let segments = [];
-    const rawTextVal = val.text != null ? val.text : (val.translate != null ? val.translate : '');
+    const rawTextVal = val.text != null
+      ? val.text
+      : (val[''] != null ? val[''] : (val.translate != null ? val.translate : ''));
     const textVal = typeof rawTextVal === 'object' && rawTextVal?.type === 'string' && typeof rawTextVal.value === 'string' ? rawTextVal.value : rawTextVal;
-    if (typeof textVal === 'string' && textVal) {
+    if (val.text == null && val[''] == null && val.translate != null && val.with != null) {
+      const tpl = typeof textVal === 'string' ? textVal : extractReasonText(textVal);
+      const rawWith = Array.isArray(val.with)
+        ? val.with
+        : (Array.isArray(val.with?.value?.value) ? val.with.value.value : (Array.isArray(val.with?.value) ? val.with.value : [val.with]));
+      const withArr = rawWith.map(extractReasonText);
+      const formatted = formatTranslateText(tpl, withArr);
+      if (formatted) segments = parseMotdSegments(formatted, style);
+    } else if (typeof textVal === 'string' && textVal) {
       segments = parseMotdSegments(textVal, style);
     } else if (textVal && typeof textVal === 'object') {
       segments = parseChatToSegments(textVal, style);
     }
-    const extraVal = val.extra?.value || val.extra;
-    if (Array.isArray(extraVal)) {
-      for (const extraChild of extraVal) {
-        segments = segments.concat(parseChatToSegments(extraChild, style));
-      }
+    if (val.extra != null) {
+      segments = segments.concat(parseChatToSegments(val.extra, style));
     }
     return segments;
   }
@@ -421,13 +457,96 @@ function serialize(item) {
 }
 
 const send = value => { if (process.connected) process.send(value); };
-const status = (username, state, message) => send({ type: 'status', username, state, message });
+const status = (username, state, message, sessionId) => {
+  const sid = sessionId !== undefined ? sessionId : activeSessionIds.get(username);
+  send({ type: 'status', username, state, message, ...(sid != null ? { sessionId: sid } : {}) });
+};
 const logLine = (username, message) => send({ type: 'log', username, message: String(message).slice(0, 500) });
+
+function safeQuit(instance) {
+  if (!instance) return;
+  let closed = false;
+  try {
+    if (typeof instance.quit === 'function') {
+      instance.quit();
+      closed = true;
+    } else if (typeof instance.end === 'function') {
+      instance.end();
+      closed = true;
+    }
+  } catch { /* ignore */ }
+  if (!closed || instance._client?.ended === false) {
+    try { instance._client?.end?.(); } catch { /* ignore */ }
+  }
+}
 
 function clearCursor(instance) {
   if (!instance) return;
   if (instance.inventory) instance.inventory.selectedItem = null;
   if (instance.currentWindow) instance.currentWindow.selectedItem = null;
+}
+
+function isEmptyPacketItem(item) {
+  return !item ||
+    item.present === false ||
+    (typeof item.itemCount === 'number' && item.itemCount <= 0) ||
+    (typeof item.count === 'number' && item.count <= 0) ||
+    item.itemId === 0 ||
+    item.blockId === -1;
+}
+
+function setCursorFromPacketItem(instance, rawItem) {
+  if (!instance || !instance.registry || isEmptyPacketItem(rawItem)) return;
+  try {
+    const Item = appRequire('prismarine-item')(instance.registry);
+    const parsed = Item.fromNotch(rawItem);
+    if (!parsed) return;
+    if (instance.inventory) instance.inventory.selectedItem = parsed;
+    if (instance.currentWindow) instance.currentWindow.selectedItem = parsed;
+  } catch { /* ignore */ }
+}
+
+function mapPlayerInventorySlot(slotId) {
+  if (!Number.isInteger(slotId)) return -1;
+  if (slotId >= 0 && slotId <= 8) return 36 + slotId;
+  if (slotId >= 9 && slotId <= 35) return slotId;
+  if (slotId >= 36 && slotId <= 39) return 8 - (slotId - 36);
+  if (slotId === 40) return 45;
+  return -1;
+}
+
+async function openBlockWindow(bot, block, timeoutMs = 4000) {
+  if (typeof bot.activateBlock !== 'function') {
+    if (typeof bot.openBlock === 'function') {
+      return await bot.openBlock(block);
+    }
+    throw new Error('Blok açma desteklenmiyor.');
+  }
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    let timer = null;
+    const onOpen = win => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      bot.removeListener('windowOpen', onOpen);
+      resolve(win);
+    };
+    timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      bot.removeListener('windowOpen', onOpen);
+      reject(new Error('timeout'));
+    }, timeoutMs);
+    bot.on('windowOpen', onOpen);
+    Promise.resolve(bot.activateBlock(block)).catch(err => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      bot.removeListener('windowOpen', onOpen);
+      reject(err);
+    });
+  });
 }
 
 function isChunkLoadedAt(bot, pos) {
@@ -465,9 +584,6 @@ function inventory(username, bot) {
   if (st.invTimer) {
     clearTimeout(st.invTimer);
     st.invTimer = null;
-  }
-  if (!bot.currentWindow && (bot.inventory?.slots || []).every(s => !s)) {
-    clearCursor(bot);
   }
   const activeWin = bot.currentWindow || bot.inventory;
   const totalSlots = activeWin && Array.isArray(activeWin.slots) ? activeWin.slots.length : (bot.inventory?.slots?.length || 0);
@@ -606,6 +722,7 @@ function getState(username) {
       joinTimer: null,
       moveTimer: null,
       lobbyTimer: null,
+      limboTimer: null,
       schedulerTimer: null,
       cleanups: [],
       parsedChatListeners: [],
@@ -614,6 +731,8 @@ function getState(username) {
       loadedScripts: [],
       recentLines: [],
       recentLoginLines: [],
+      recentTitleLines: [],
+      lastPromptSent: new Map(),
       lastAutoReplyAt: 0,
       lastAutoLoginAt: 0,
       lastAutoAcceptAt: 0,
@@ -664,6 +783,12 @@ function reportWorkerAutomation(username, key, statusState, message, finished = 
   }
 }
 
+function isPlayState(bot) {
+  if (!bot) return false;
+  if (bot._client && bot._client.state && bot._client.state !== 'play') return false;
+  return true;
+}
+
 function stopAfk(username, bot) {
   const state = pluginStates.get(username);
   if (!state) return;
@@ -684,6 +809,7 @@ function applyAntiAfk(username, bot) {
   const intervalMs = Math.max(5, Number(afk.intervalSeconds) || 30) * 1000;
   state.afkTimer = setInterval(() => {
     if (bots.get(username) !== bot || !bot.entity) { stopAfk(username, bot); return; }
+    if (!isPlayState(bot)) return;
     try {
       if (afk.rotate && typeof bot.look === 'function') {
         const yaw = bot.entity.yaw + (Math.random() - 0.5) * 0.8;
@@ -719,6 +845,75 @@ function recordSentMessage(username, text) {
   state.recentSentMessages.push({ text: clean, at: now });
 }
 
+function isRecentSelfEcho(username, raw) {
+  const text = String(raw || '').trim();
+  if (!text) return false;
+  const state = getState(username);
+  const now = Date.now();
+  state.recentSentMessages = state.recentSentMessages.filter(item => now - item.at <= 5000);
+  const lowerText = text.toLowerCase();
+  return state.recentSentMessages.some(item => {
+    const lowerSent = item.text.toLowerCase();
+    return lowerText === lowerSent || lowerText.endsWith(lowerSent);
+  });
+}
+
+function matchBufferedPattern(buffer, regexLines, now, maxAgeMs = 3000) {
+  const count = Array.isArray(regexLines) ? regexLines.length : 0;
+  if (!count || buffer.length < count) return null;
+  let compiled;
+  try {
+    compiled = regexLines.map(r => new RegExp(r, 'i'));
+  } catch {
+    return null;
+  }
+
+  // Fast path: consecutive tail lines
+  const tailStart = buffer.length - count;
+  if (now - buffer[tailStart].at <= maxAgeMs) {
+    const tailMatches = [];
+    let ok = true;
+    for (let i = 0; i < count; i++) {
+      const m = compiled[i].exec(buffer[tailStart + i].text);
+      if (!m) { ok = false; break; }
+      tailMatches.push(m);
+    }
+    if (ok) {
+      return {
+        indices: Array.from({ length: count }, (_, i) => tailStart + i),
+        matches: tailMatches,
+      };
+    }
+  }
+
+  if (count <= 1) return null;
+
+  // Tolerate intervening announcements / blank lines within a small window ending at the latest line
+  const lastIdx = buffer.length - 1;
+  const lastMatch = compiled[count - 1].exec(buffer[lastIdx].text);
+  if (!lastMatch) return null;
+
+  const windowStart = Math.max(0, buffer.length - (count + 4));
+  const pickedIndices = [];
+  const pickedMatches = [];
+  let ruleIdx = 0;
+  for (let bufIdx = windowStart; bufIdx < lastIdx && ruleIdx < count - 1; bufIdx++) {
+    if (now - buffer[bufIdx].at > maxAgeMs) continue;
+    const m = compiled[ruleIdx].exec(buffer[bufIdx].text);
+    if (m) {
+      pickedIndices.push(bufIdx);
+      pickedMatches.push(m);
+      ruleIdx++;
+    }
+  }
+  if (ruleIdx === count - 1) {
+    pickedIndices.push(lastIdx);
+    pickedMatches.push(lastMatch);
+    return { indices: pickedIndices, matches: pickedMatches };
+  }
+  return null;
+}
+
 function isSelfMessage(username, raw, parsed) {
   if (parsed?.sender && parsed.sender.toLowerCase() === username.toLowerCase()) return true;
   const text = String(raw || '').trim();
@@ -745,7 +940,7 @@ function sendJoinChatNow(username, bot) {
   if (state.joinTimer) { clearTimeout(state.joinTimer); state.joinTimer = null; }
   const chatCfg = state.plugins?.autoChat;
   const joinMsg = chatCfg?.joinMessage?.trim();
-  if (!chatCfg?.enabled || !joinMsg || bots.get(username) !== bot) return;
+  if (!chatCfg?.enabled || !joinMsg || bots.get(username) !== bot || !isPlayState(bot)) return;
   try {
     const text = joinMsg.slice(0, 256);
     recordSentMessage(username, text);
@@ -757,6 +952,17 @@ function sendJoinChatNow(username, bot) {
   }
 }
 
+function shouldWaitForAutoLogin(state) {
+  const loginCfg = state.plugins?.autoLogin;
+  return Boolean(
+    loginCfg?.enabled &&
+    loginCfg.password &&
+    Array.isArray(loginCfg.patterns) &&
+    loginCfg.patterns.length &&
+    !state.loginCommandSent
+  );
+}
+
 function triggerJoinChat(username, bot) {
   const state = getState(username);
   if (state.joinTimer) { clearTimeout(state.joinTimer); state.joinTimer = null; }
@@ -765,16 +971,7 @@ function triggerJoinChat(username, bot) {
   const joinMsg = chatCfg?.joinMessage?.trim();
   if (!chatCfg?.enabled || !joinMsg) return;
 
-  const loginCfg = state.plugins?.autoLogin;
-  const waitForAutoLogin = Boolean(
-    loginCfg?.enabled &&
-    loginCfg.password &&
-    Array.isArray(loginCfg.patterns) &&
-    loginCfg.patterns.length &&
-    !state.loginCommandSent
-  );
-
-  if (waitForAutoLogin) {
+  if (shouldWaitForAutoLogin(state)) {
     state.pendingJoinChat = true;
     state.joinTimer = setTimeout(() => sendJoinChatNow(username, bot), 10000);
     return;
@@ -786,7 +983,9 @@ function triggerJoinChat(username, bot) {
 function tryParseChat(username, text) {
   const state = getState(username);
   const now = Date.now();
-  state.recentLines.push({ text, at: now });
+  const clean = String(text || '');
+  if (!clean.trim()) return null;
+  state.recentLines.push({ text: clean, at: now });
   if (state.recentLines.length > 20) state.recentLines = state.recentLines.slice(-20);
 
   const patterns = Array.isArray(state.plugins?.chatPatterns) ? [...state.plugins.chatPatterns] : [];
@@ -794,30 +993,26 @@ function tryParseChat(username, text) {
   patterns.sort((a, b) => (b.lineCount || 1) - (a.lineCount || 1));
 
   for (const rule of patterns) {
-    const count = Array.isArray(rule.regexLines) ? rule.regexLines.length : 0;
-    if (!count || state.recentLines.length < count) continue;
-    const slice = state.recentLines.slice(-count);
-    if (now - slice[0].at > 3000) continue;
+    const result = matchBufferedPattern(state.recentLines, rule.regexLines, now, 3000);
+    if (!result) continue;
 
     let sender = '';
     let message = '';
-    let matched = true;
-    for (let i = 0; i < count; i++) {
-      let re;
-      try { re = new RegExp(rule.regexLines[i], 'i'); } catch { matched = false; break; }
-      const m = re.exec(slice[i].text);
-      if (!m) { matched = false; break; }
+    for (const m of result.matches) {
       if (m.groups?.sender) sender = m.groups.sender;
       if (m.groups?.message) message = m.groups.message.trim();
     }
-    if (matched && message) {
-      state.recentLines.splice(state.recentLines.length - count, count);
+    if (message) {
+      const rawLines = result.indices.map(idx => state.recentLines[idx].text);
+      for (let i = result.indices.length - 1; i >= 0; i--) {
+        state.recentLines.splice(result.indices[i], 1);
+      }
       return {
         type: rule.type === 'pm' ? 'pm' : 'chat',
         ruleName: rule.name || '',
         sender,
         message,
-        rawLines: slice.map(item => item.text),
+        rawLines,
       };
     }
   }
@@ -827,7 +1022,7 @@ function tryParseChat(username, text) {
 function handleAutoChat(username, bot, text, parsed) {
   const state = getState(username);
   const chatCfg = state.plugins?.autoChat;
-  if (!chatCfg?.enabled || !Array.isArray(chatCfg.rules) || !chatCfg.rules.length) return;
+  if (!chatCfg?.enabled || !Array.isArray(chatCfg.rules) || !chatCfg.rules.length || !isPlayState(bot)) return;
   const raw = String(text || '');
   if (isSelfMessage(username, raw, parsed)) return;
   const cooldownMs = Math.max(1, Number(chatCfg.cooldownSeconds) || 3) * 1000;
@@ -863,17 +1058,21 @@ function handleAutoLogin(username, bot, text, source = 'chat') {
   const state = getState(username);
   const now = Date.now();
   const raw = String(text || '');
-  if (!raw) return;
+  if (!raw.trim()) return;
 
   if (source === 'chat') {
     state.recentLoginLines.push({ text: raw, at: now });
     if (state.recentLoginLines.length > 20) state.recentLoginLines = state.recentLoginLines.slice(-20);
+  } else if (source === 'title' || source === 'subtitle') {
+    state.recentTitleLines.push({ text: raw, at: now });
+    if (state.recentTitleLines.length > 12) state.recentTitleLines = state.recentTitleLines.slice(-12);
   }
 
   const loginCfg = state.plugins?.autoLogin;
   if (!loginCfg?.enabled || !loginCfg.password || !Array.isArray(loginCfg.patterns) || !loginCfg.patterns.length) return;
+  if (!isPlayState(bot)) return;
   if (source !== 'chat' && loginCfg.listenTitleActionbar === false) return;
-  if (isSelfMessage(username, raw, null)) return;
+  if (isRecentSelfEcho(username, raw)) return;
 
   const cooldownMs = Math.max(1, Number(loginCfg.cooldownSeconds) || 5) * 1000;
   if (now - state.lastAutoLoginAt < cooldownMs) return;
@@ -883,26 +1082,29 @@ function handleAutoLogin(username, bot, text, source = 'chat') {
   for (const rule of patterns) {
     const count = Array.isArray(rule.regexLines) ? rule.regexLines.length : 0;
     if (!count) continue;
-    let slice;
+    let matchedIndices = null;
     if (source === 'chat') {
-      if (state.recentLoginLines.length < count) continue;
-      slice = state.recentLoginLines.slice(-count);
-      if (now - slice[0].at > 3000) continue;
+      const res = matchBufferedPattern(state.recentLoginLines, rule.regexLines, now, 3000);
+      if (!res) continue;
+      matchedIndices = res.indices;
+    } else if (source === 'title' || source === 'subtitle') {
+      const res = matchBufferedPattern(state.recentTitleLines, rule.regexLines, now, 3000);
+      if (!res) continue;
+      matchedIndices = res.indices;
     } else {
       if (count !== 1) continue;
-      slice = [{ text: raw, at: now }];
+      const res = matchBufferedPattern([{ text: raw, at: now }], rule.regexLines, now, 3000);
+      if (!res) continue;
     }
 
-    let matched = true;
-    for (let i = 0; i < count; i++) {
-      let re;
-      try { re = new RegExp(rule.regexLines[i], 'i'); } catch { matched = false; break; }
-      if (!re.test(slice[i].text)) { matched = false; break; }
-    }
-    if (!matched) continue;
-
-    if (source === 'chat') {
-      state.recentLoginLines.splice(state.recentLoginLines.length - count, count);
+    if (source === 'chat' && matchedIndices) {
+      for (let i = matchedIndices.length - 1; i >= 0; i--) {
+        state.recentLoginLines.splice(matchedIndices[i], 1);
+      }
+    } else if ((source === 'title' || source === 'subtitle') && matchedIndices) {
+      for (let i = matchedIndices.length - 1; i >= 0; i--) {
+        state.recentTitleLines.splice(matchedIndices[i], 1);
+      }
     }
     const isRegister = rule.action === 'register';
     const template = isRegister
@@ -938,7 +1140,7 @@ function handleAutoLogin(username, bot, text, source = 'chat') {
 function handleAutoAccept(username, bot, text, parsed) {
   const state = getState(username);
   const acceptCfg = state.plugins?.autoAccept;
-  if (!acceptCfg?.enabled) return;
+  if (!acceptCfg?.enabled || !isPlayState(bot)) return;
   const raw = String(text || '');
   if (!raw) return;
   if (isSelfMessage(username, raw, parsed)) return;
@@ -1005,6 +1207,7 @@ function applyCommandScheduler(username, bot) {
       stopCommandScheduler(username);
       return;
     }
+    if (!isPlayState(bot)) return;
     const now = Date.now();
     const activeTasks = (state.plugins.commandScheduler.tasks || []).filter(t => t && t.enabled && typeof t.command === 'string' && t.command.trim());
     for (const task of activeTasks) {
@@ -1034,7 +1237,7 @@ function sendLobbyPostCommand(username, bot) {
     return;
   }
   setTimeout(() => {
-    if (bots.get(username) !== bot) return;
+    if (bots.get(username) !== bot || !isPlayState(bot)) return;
     try {
       const cmd = postCmd.slice(0, 128);
       recordSentMessage(username, cmd);
@@ -1087,11 +1290,15 @@ function scheduleAutoLobby(username, bot) {
     return;
   }
   if (state.lobbyCompleted || bots.get(username) !== bot) return;
-  const delaySec = Math.max(1, Number(cfg.delaySeconds) || 4);
-  reportWorkerAutomation(username, 'autoLobby', 'waiting', `${delaySec} sn bekleniyor...`);
+  const waitMs = shouldWaitForAutoLogin(state) ? 12000 : (Math.max(1, Number(cfg.delaySeconds) || 4) * 1000);
+  const waitLabel = shouldWaitForAutoLogin(state)
+    ? 'Giriş komutu bekleniyor...'
+    : `${Math.max(1, Number(cfg.delaySeconds) || 4)} sn bekleniyor...`;
+  reportWorkerAutomation(username, 'autoLobby', 'waiting', waitLabel);
   state.lobbyTimer = setTimeout(() => {
     state.lobbyTimer = null;
     if (bots.get(username) !== bot || !state.plugins?.autoLobby?.enabled || state.lobbyCompleted) return;
+    if (!isPlayState(bot)) return;
     state.lobbyCompleted = true;
     reportWorkerAutomation(username, 'autoLobby', 'running', 'Lobi yönlendirmesi çalışıyor...');
     const needsWindow = cfg.clickSlot >= 0 || Boolean(cfg.itemKeyword?.trim());
@@ -1117,7 +1324,7 @@ function scheduleAutoLobby(username, bot) {
     } else {
       sendLobbyPostCommand(username, bot);
     }
-  }, delaySec * 1000);
+  }, waitMs);
 }
 
 function unloadExternalPlugins(username) {
@@ -1226,11 +1433,14 @@ function cleanupPlugins(username, bot) {
   state.manualControls.clear();
   if (state.joinTimer) { clearTimeout(state.joinTimer); state.joinTimer = null; }
   if (state.lobbyTimer) { clearTimeout(state.lobbyTimer); state.lobbyTimer = null; }
+  if (state.limboTimer) { clearTimeout(state.limboTimer); state.limboTimer = null; }
   if (state.moveTimer) { clearInterval(state.moveTimer); state.moveTimer = null; }
   if (state.invTimer) { clearTimeout(state.invTimer); state.invTimer = null; }
   state.parsedChatListeners = [];
   state.recentLines = [];
   state.recentLoginLines = [];
+  state.recentTitleLines = [];
+  state.lastPromptSent?.clear();
   state.lastAutoLoginAt = 0;
   state.lastAutoAcceptAt = 0;
   state.lastWorldCenter = null;
@@ -1245,8 +1455,23 @@ function cleanupPlugins(username, bot) {
 function broadcastWorkerError(prefix, error) {
   const detail = error?.stack || error?.message || String(error);
   const text = `${prefix}: ${detail}`;
-  for (const uname of bots.keys()) {
+  if (bots.size === 0) {
+    process.stderr.write(`${text}\n`);
+    return;
+  }
+  const isUncaught = prefix.includes('yakalanmamış');
+  const msg = String(error?.message || error || '');
+  const isFatalInitErr = isUncaught && /not supported|Unsupported|no data for version|ECONN|ENOTFOUND|ETIMEDOUT/i.test(msg);
+  for (const [uname, inst] of [...bots.entries()]) {
     logLine(uname, text);
+    send({ type: 'operation-error', username: uname, message: text.slice(0, 300) });
+    if (isFatalInitErr && botConnectionStates.get(uname) === 'connecting') {
+      botConnectionStates.delete(uname);
+      cleanupPlugins(uname, inst);
+      bots.delete(uname);
+      safeQuit(inst);
+      status(uname, 'error', msg || text);
+    }
   }
 }
 
@@ -1258,56 +1483,107 @@ process.on('unhandledRejection', error => {
   broadcastWorkerError('Worker işlenmemiş promise hatası', error);
 });
 
+function isHardNetworkError(error) {
+  const code = String(error?.code || '').toUpperCase();
+  if (['ENOTFOUND', 'ECONNREFUSED', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH', 'EAI_AGAIN'].includes(code)) {
+    return true;
+  }
+  const msg = String(error?.message || '');
+  return /\b(ENOTFOUND|ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|EAI_AGAIN)\b/i.test(msg);
+}
+
+function selectSupportedVersion(candidates) {
+  const tested = candidates.find(v => TESTED_VERSION_SET.has(v.minecraftVersion));
+  if (tested) return tested.minecraftVersion;
+  const oldest = mineflayer.oldestSupportedVersion || '1.8.8';
+  const latest = mineflayer.latestSupportedVersion || '1.21.8';
+  for (const candidate of candidates) {
+    const ver = candidate?.minecraftVersion;
+    if (!ver || !/^\d+\.\d+(?:\.\d+)?$/.test(ver)) continue;
+    try {
+      const reg = prismarineRegistry(ver);
+      if (reg?.version && reg.version['>='](oldest) && reg.version['<='](latest)) {
+        return ver;
+      }
+    } catch { /* ignore unsupported candidate */ }
+  }
+  return null;
+}
+
 async function resolveAutoVersion(username, host, port) {
+  const fallback = mineflayer.latestSupportedVersion || '1.21.8';
   let timer;
-  const response = await Promise.race([
-    mc.ping({ host, port }),
-    new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error('Ping zaman aşımı (5 sn)')), 5000);
-    }),
-  ]).finally(() => {
-    if (timer) clearTimeout(timer);
-  });
+  const pingPromise = mc.ping({ host, port, noPongTimeout: 1500, closeTimeout: 5500 });
+  pingPromise.catch(() => {});
+  let response;
+  try {
+    response = await Promise.race([
+      pingPromise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Ping zaman aşımı (6.5 sn)')), 6500);
+      }),
+    ]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
+  } catch (error) {
+    if (isHardNetworkError(error)) throw error;
+    logLine(username, `Sunucu status ping yanıtı alınamadı (${error?.message || String(error)}), ${fallback} ile deneniyor.`);
+    return fallback;
+  }
   const proto = response?.version?.protocol;
   const serverName = response?.version?.name || String(proto ?? 'bilinmiyor');
   const candidates = proto != null ? (mcData.postNettyVersionsByProtocolVersion?.pc?.[proto] || []) : [];
-  const matched = candidates.find(v => TESTED_VERSION_SET.has(v.minecraftVersion));
-  if (matched) return matched.minecraftVersion;
-  const fallback = mineflayer.latestSupportedVersion || '1.21.8';
+  const matched = selectSupportedVersion(candidates);
+  if (matched) return matched;
   logLine(username, `Sunucu sürümü ${serverName} desteklenmiyor, ${fallback} ile deneniyor (ViaVersion gerektirir)`);
   return fallback;
 }
 
 process.on('message', payload => {
   if (!payload || typeof payload !== 'object') return;
-  let { action, bot, username, message, slot, requestId, click, plugins, pluginsDir, pos, name, control, state, yaw, pitch, durationMs, entityId, enabled } = payload;
+  let { action, bot, username, message, slot, requestId, click, plugins, pluginsDir, pos, name, control, state, yaw, pitch, durationMs, entityId, enabled, sessionId } = payload;
   try {
   if (action === 'connect') {
     if (!bot || typeof bot.username !== 'string' || !bot.username.trim()) {
-      if (username) status(username, 'error', 'Geçersiz bot yapılandırması.');
+      if (username) status(username, 'error', 'Geçersiz bot yapılandırması.', sessionId);
       return;
     }
     username = bot.username;
+    const rawHost = typeof bot.host === 'string' ? bot.host.trim() : '';
+    const hostPortMatch = /^(?:\[([^\]]+)\]|([^:\s]+)):(\d{1,5})$/.exec(rawHost);
+    if (hostPortMatch) {
+      const candidateHost = (hostPortMatch[1] || hostPortMatch[2] || '').trim();
+      const parsedPort = Number(hostPortMatch[3]);
+      if (candidateHost && parsedPort >= 1 && parsedPort <= 65535) {
+        bot = { ...bot, host: candidateHost, port: parsedPort };
+      }
+    }
     const token = (connectTokens.get(username) || 0) + 1;
     connectTokens.set(username, token);
+    if (sessionId != null) activeSessionIds.set(username, sessionId);
+    else activeSessionIds.delete(username);
+    const currentSessionId = sessionId != null ? sessionId : undefined;
     if (bots.has(username)) {
       const oldInstance = bots.get(username);
       logLine(username, 'Önceki bot örneği temizlenip yeniden bağlanılıyor.');
       cleanupPlugins(username, oldInstance);
       bots.delete(username);
-      try { oldInstance?.quit?.(); } catch { /* ignore */ }
+      safeQuit(oldInstance);
     }
     const pluginState = getState(username);
     pluginState.plugins = plugins || null;
     pluginState.pluginsDir = pluginsDir || '';
-    status(username, 'connecting');
+    botConnectionStates.set(username, 'connecting');
+    status(username, 'connecting', undefined, currentSessionId);
 
     const startBotInstance = (resolvedBot) => {
     try {
       let failure;
       let failureReported = false;
       let loggedIn = false;
-      let spawnedOnce = false;
+      let connectedOnce = false;
+      let limboForcedScheduled = false;
+      let realSpawnedOnce = false;
       let pluginsInitialized = false;
       let inventoryBound = false;
       const instance = mineflayer.createBot({ ...resolvedBot, auth: 'offline' });
@@ -1324,78 +1600,26 @@ process.on('message', payload => {
         pluginsInitialized = true;
         loadExternalPlugins(username, instance);
       };
-      const seenResourcePacks = new Set();
-      const registerResourcePack = (url, uuid) => {
+      const activateConnection = (fromSpawn) => {
         if (!current()) return;
-        const key = uuid || url;
-        if (key && seenResourcePacks.has(key)) return;
-        if (key) seenResourcePacks.add(key);
-        if (url && typeof url === 'string') {
-          send({ type: 'resource-pack', username, url });
-          logLine(username, `Resource pack bulundu: ${url}`);
+        if (pluginState.limboTimer) {
+          clearTimeout(pluginState.limboTimer);
+          pluginState.limboTimer = null;
         }
-        try {
-          if (typeof instance.acceptResourcePack === 'function') {
-            instance.acceptResourcePack();
+        if (!connectedOnce) {
+          connectedOnce = true;
+          botConnectionStates.set(username, 'connected');
+          if (!fromSpawn) {
+            logLine(username, 'Sunucu sağlık paketi göndermedi (Limbo/Auth), bağlantı etkinleştirildi.');
           }
-        } catch (error) {
-          logLine(username, `Resource pack kabul hatası: ${String(error?.message || error)}`);
-        }
-      };
-
-      instance.once('login', () => {
-        if (!current()) return;
-        loggedIn = true;
-        status(username, 'connecting', 'Dünya yükleniyor...');
-        bindInventory();
-        if (instance._client) {
-          instance._client.on('set_slot', packet => {
-            if (!current()) return;
-            const st = getState(username);
-            if (packet.windowId === -1 || packet.windowId === 255 || packet.slot === -1) {
-              if (!packet.item || packet.item.present === false || packet.item.itemId === 0 || packet.item.blockId === -1) {
-                clearCursor(instance);
-                scheduleInventory(username, instance);
-              }
-            } else if (
-              st.lastClickedSlot === packet.slot &&
-              Date.now() - (st.lastClickAt || 0) < 1500 &&
-              packet.item &&
-              packet.item.present !== false &&
-              packet.item.itemId !== 0 &&
-              packet.item.blockId !== -1
-            ) {
-              // Server restored the item back into the clicked slot (cancelled pickup!)
-              clearCursor(instance);
-              scheduleInventory(username, instance);
-            }
-          });
-          instance._client.on('window_items', packet => {
-            if (!current()) return;
-            if (packet.carriedItem === undefined || !packet.carriedItem || packet.carriedItem.present === false || packet.carriedItem.itemId === 0 || packet.carriedItem.blockId === -1) {
-              clearCursor(instance);
-            }
-            scheduleInventory(username, instance, 20);
-          });
-        }
-      });
-      instance.on('forcedMove', () => {
-        if (!current()) return;
-        sendPose(username, instance);
-      });
-      instance.on('spawn', () => {
-        if (!current()) return;
-        clearCursor(instance);
-        if (!spawnedOnce) {
-          spawnedOnce = true;
-          status(username, 'connected');
+          status(username, 'connected', undefined, currentSessionId);
           triggerJoinChat(username, instance);
           initPluginsOnce();
-        } else {
-          logLine(username, 'Yeniden doğuldu / boyut değişti.');
         }
         bindInventory();
-        applyAntiAfk(username, instance);
+        if (instance.entity?.position) {
+          applyAntiAfk(username, instance);
+        }
         applyCommandScheduler(username, instance);
         if (!pluginState.automation) {
           pluginState.automation = createAutomation(instance, {
@@ -1410,10 +1634,11 @@ process.on('message', payload => {
             onPanicDisconnect: (reason, disableReconnect) => {
               logLine(username, `Acil panik çıkışı: ${reason}`);
               if (disableReconnect) send({ type: 'panic-disconnect', username, reason });
+              botConnectionStates.delete(username);
               cleanupPlugins(username, instance);
               bots.delete(username);
-              try { instance.quit(); } catch {}
-              status(username, 'disconnected', reason);
+              safeQuit(instance);
+              status(username, 'disconnected', reason, currentSessionId);
             },
             enqueue: fn => {
               const operation = (queues.get(username) || Promise.resolve()).catch(() => {}).then(fn);
@@ -1425,11 +1650,219 @@ process.on('message', payload => {
         }
         pluginState.automation.update(pluginState.plugins);
         initPluginsOnce();
-        if (!pluginState.lobbyCompleted && !pluginState.lobbyTimer) {
+        if (fromSpawn && !pluginState.lobbyCompleted && !pluginState.lobbyTimer && instance.entity?.position) {
           scheduleAutoLobby(username, instance);
         }
+        if (instance.entity?.position) {
+          sendPose(username, instance);
+          sendWorld(username, instance);
+        }
+      };
+      const seenResourcePacks = new Set();
+      let inConfiguration = false;
+      let savedPhysicsBeforeConfig = true;
+      const registerResourcePack = (url, uuid) => {
+        if (!current()) return;
+        const uuidStr = uuid ? String(uuid).toLowerCase() : '';
+        const key = uuidStr || (typeof url === 'string' ? url : '');
+        if (key && seenResourcePacks.has(key)) return;
+        if (key) seenResourcePacks.add(key);
+        if (url && typeof url === 'string') {
+          send({ type: 'resource-pack', username, url });
+          logLine(username, `Resource pack bulundu: ${url}`);
+        }
+        try {
+          const usesUUID = typeof instance.supportFeature === 'function' && instance.supportFeature('resourcePackUsesUUID');
+          if (usesUUID && uuidStr && instance._client) {
+            instance._client.write('resource_pack_receive', { uuid: uuidStr, result: 3 });
+            instance._client.write('resource_pack_receive', { uuid: uuidStr, result: 0 });
+          } else if (typeof instance.acceptResourcePack === 'function') {
+            instance.acceptResourcePack();
+          }
+        } catch (error) {
+          logLine(username, `Resource pack kabul hatası: ${String(error?.message || error)}`);
+        }
+      };
+
+      const dispatchChannelPrompt = (source, text, segments) => {
+        if (!current()) return;
+        const clean = stripPua(String(text || '')).trim().slice(0, 2000);
+        if (!clean) return;
+        const st = getState(username);
+        const now = Date.now();
+        const dedupKey = `${source}:${clean}`;
+        const prevAt = st.lastPromptSent.get(dedupKey) || 0;
+        if (now - prevAt < 50) return;
+        st.lastPromptSent.set(dedupKey, now);
+        if (st.lastPromptSent.size > 30) {
+          for (const [k, t] of st.lastPromptSent.entries()) {
+            if (now - t > 1000) st.lastPromptSent.delete(k);
+          }
+        }
+        send({
+          type: source === 'actionbar' ? 'actionbar' : 'title',
+          source,
+          username,
+          text: clean,
+          ...(segments?.length ? { segments } : {}),
+        });
+        handleAutoLogin(username, instance, clean, source);
+      };
+
+      const emitRawChannelPrompt = (source, rawPayload) => {
+        if (!current() || rawPayload == null) return;
+        const segments = parseChatToSegments(rawPayload);
+        const fromSegs = cleanChatText(segments.map(s => s.text).join(''));
+        const text = fromSegs || stripPua(formatReason(rawPayload));
+        dispatchChannelPrompt(source, text, segments.length ? segments : undefined);
+      };
+
+      if (instance._client) {
+        instance._client.on('remove_resource_pack', packet => {
+          if (!current()) return;
+          if (packet?.uuid == null) {
+            seenResourcePacks.clear();
+          } else {
+            seenResourcePacks.delete(String(packet.uuid).toLowerCase());
+          }
+        });
+        instance._client.on('start_configuration', () => {
+          if (!current()) return;
+          inConfiguration = true;
+          savedPhysicsBeforeConfig = instance.physicsEnabled !== false;
+          instance.physicsEnabled = false;
+          try { instance.clearControlStates?.(); } catch { /* ignore */ }
+          logLine(username, 'Sunucu yapılandırma (configuration) fazına geçildi.');
+        });
+        instance._client.on('cookie_request', packet => {
+          if (!current() || !packet?.key) return;
+          try {
+            instance._client.write('cookie_response', { key: packet.key, payload: undefined });
+          } catch (error) {
+            logLine(username, `Cookie yanıt hatası: ${String(error?.message || error)}`);
+          }
+        });
+        instance._client.on('transfer', packet => {
+          if (!current()) return;
+          logLine(username, `Sunucu transfer isteği aldı: ${packet?.host || '?'}:${packet?.port ?? ''}`);
+        });
+        instance._client.on('title', packet => {
+          if (!current() || !packet) return;
+          if (packet.action === 0) emitRawChannelPrompt('title', packet.text);
+          else if (packet.action === 1) emitRawChannelPrompt('subtitle', packet.text);
+          else if (packet.action === 2) emitRawChannelPrompt('actionbar', packet.text);
+        });
+        instance._client.on('set_title_text', packet => {
+          if (!current() || !packet) return;
+          emitRawChannelPrompt('title', packet.text);
+        });
+        instance._client.on('set_title_subtitle', packet => {
+          if (!current() || !packet) return;
+          emitRawChannelPrompt('subtitle', packet.text);
+        });
+        instance._client.on('action_bar', packet => {
+          if (!current() || !packet) return;
+          emitRawChannelPrompt('actionbar', packet.text);
+        });
+      }
+
+      instance.on('login', () => {
+        if (!current()) return;
+        seenResourcePacks.clear();
+        if (inConfiguration) {
+          inConfiguration = false;
+          instance.physicsEnabled = savedPhysicsBeforeConfig;
+        }
+        if (connectedOnce && !pluginState.lobbyCompleted && pluginState.lobbyTimer) {
+          clearTimeout(pluginState.lobbyTimer);
+          pluginState.lobbyTimer = null;
+        }
+      });
+
+      instance.once('login', () => {
+        if (!current()) return;
+        loggedIn = true;
+        status(username, 'connecting', 'Dünya yükleniyor...', currentSessionId);
+        bindInventory();
+        if (!connectedOnce && !pluginState.limboTimer) {
+          pluginState.limboTimer = setTimeout(() => {
+            pluginState.limboTimer = null;
+            if (current() && !connectedOnce) activateConnection(false);
+          }, 1500);
+        }
+        if (instance._client) {
+          instance._client.on('set_slot', packet => {
+            if (!current()) return;
+            const st = getState(username);
+            if (packet.windowId === -1 || packet.windowId === 255 || packet.slot === -1) {
+              if (isEmptyPacketItem(packet.item)) {
+                clearCursor(instance);
+              } else {
+                setCursorFromPacketItem(instance, packet.item);
+              }
+              scheduleInventory(username, instance);
+            } else if (
+              st.lastClickedSlot === packet.slot &&
+              Date.now() - (st.lastClickAt || 0) < 1500 &&
+              !isEmptyPacketItem(packet.item)
+            ) {
+              // Server restored the item back into the clicked slot (cancelled pickup!)
+              clearCursor(instance);
+              scheduleInventory(username, instance);
+            }
+          });
+          instance._client.on('window_items', packet => {
+            if (!current()) return;
+            if (isEmptyPacketItem(packet.carriedItem)) {
+              clearCursor(instance);
+            } else {
+              setCursorFromPacketItem(instance, packet.carriedItem);
+            }
+            scheduleInventory(username, instance, 20);
+          });
+          instance._client.on('set_cursor_item', packet => {
+            if (!current()) return;
+            if (isEmptyPacketItem(packet?.contents)) {
+              clearCursor(instance);
+            } else {
+              setCursorFromPacketItem(instance, packet.contents);
+            }
+            scheduleInventory(username, instance);
+          });
+          instance._client.on('set_player_inventory', packet => {
+            if (!current() || !instance.inventory || !instance.registry) return;
+            const winSlot = mapPlayerInventorySlot(packet?.slotId);
+            if (winSlot < 0) return;
+            try {
+              const Item = appRequire('prismarine-item')(instance.registry);
+              const item = isEmptyPacketItem(packet?.contents) ? null : Item.fromNotch(packet.contents);
+              instance.inventory.updateSlot(winSlot, item);
+            } catch { /* ignore */ }
+            scheduleInventory(username, instance);
+          });
+        }
+      });
+      instance.on('forcedMove', () => {
+        if (!current()) return;
         sendPose(username, instance);
-        sendWorld(username, instance);
+        if (loggedIn && !connectedOnce && !limboForcedScheduled) {
+          limboForcedScheduled = true;
+          if (pluginState.limboTimer) clearTimeout(pluginState.limboTimer);
+          pluginState.limboTimer = setTimeout(() => {
+            pluginState.limboTimer = null;
+            if (current() && !connectedOnce) activateConnection(false);
+          }, 250);
+        }
+      });
+      instance.on('spawn', () => {
+        if (!current()) return;
+        clearCursor(instance);
+        const wasRealSpawned = realSpawnedOnce;
+        realSpawnedOnce = true;
+        if (wasRealSpawned) {
+          logLine(username, 'Yeniden doğuldu / boyut değişti.');
+        }
+        activateConnection(true);
       });
       instance.on('move', () => {
         if (!current() || !instance.entity?.position) return;
@@ -1467,45 +1900,48 @@ process.on('message', payload => {
         clearCursor(instance);
         inventory(username, instance);
       });
-      instance.on('title', text => {
-        if (!current()) return;
-        const cleanTitle = stripPua(formatReason(text));
-        if (cleanTitle) handleAutoLogin(username, instance, cleanTitle, 'title');
-      });
       instance.on('message', (jsonMsg, position) => {
         if (!current()) return;
-        const rawText = String(typeof jsonMsg?.toString === 'function' ? jsonMsg.toString() : jsonMsg || '').slice(0, 2000);
-        const msg = stripPua(rawText);
-        if (position === 'game_info') {
-          if (msg) {
-            send({ type: 'actionbar', username, text: msg });
-            handleAutoLogin(username, instance, msg, 'actionbar');
+        try {
+          const effectiveJson = (jsonMsg?.unsigned && String(jsonMsg.unsigned.toString?.() || '').trim())
+            ? jsonMsg.unsigned
+            : jsonMsg;
+          let rawText = typeof effectiveJson?.toString === 'function' ? String(effectiveJson.toString()) : '';
+          if (!rawText.trim()) rawText = extractReasonText(effectiveJson?.json || effectiveJson);
+          rawText = String(rawText || '').slice(0, 2000);
+          const msg = stripPua(rawText);
+          const motd = typeof effectiveJson?.toMotd === 'function' ? String(effectiveJson.toMotd()).slice(0, 4000) : '';
+          const segments = motd
+            ? parseMotdSegments(motd)
+            : (effectiveJson && typeof effectiveJson === 'object' ? parseChatToSegments(effectiveJson.json || effectiveJson) : undefined);
+          if (segments?.length && /^\s+$/.test(segments[0].text)) segments.shift();
+          if (position === 'game_info') {
+            dispatchChannelPrompt('actionbar', msg, segments?.length ? segments : undefined);
+            return;
           }
-          return;
-        }
-        const motd = typeof jsonMsg?.toMotd === 'function' ? String(jsonMsg.toMotd()).slice(0, 4000) : '';
-        const segments = motd ? parseMotdSegments(motd) : undefined;
-        if (segments?.length && /^\s+$/.test(segments[0].text)) segments.shift();
-        send({ type: 'chat', username, text: msg, ...(segments?.length ? { segments } : {}) });
-        const parsed = tryParseChat(username, msg);
-        if (parsed) {
-          const st = getState(username);
-          for (const listener of st.parsedChatListeners) {
-            try { listener(parsed); } catch (error) { logLine(username, `Eklenti parsedChat hatası: ${String(error)}`); }
-          }
-          for (const [scriptName, listeners] of st.scriptParsedChatListeners.entries()) {
-            for (const listener of listeners) {
-              try { listener(parsed); } catch (error) {
-                logLine(username, `Eklenti parsedChat hatası (${scriptName}): ${String(error)}`);
-                reportWorkerAutomation(username, `script:${scriptName}`, 'error', String(error?.message || error));
+          send({ type: 'chat', username, text: msg, ...(segments?.length ? { segments } : {}) });
+          const parsed = tryParseChat(username, msg);
+          if (parsed) {
+            const st = getState(username);
+            for (const listener of st.parsedChatListeners) {
+              try { listener(parsed); } catch (error) { logLine(username, `Eklenti parsedChat hatası: ${String(error)}`); }
+            }
+            for (const [scriptName, listeners] of st.scriptParsedChatListeners.entries()) {
+              for (const listener of listeners) {
+                try { listener(parsed); } catch (error) {
+                  logLine(username, `Eklenti parsedChat hatası (${scriptName}): ${String(error)}`);
+                  reportWorkerAutomation(username, `script:${scriptName}`, 'error', String(error?.message || error));
+                }
               }
             }
+            instance.emit('mynbot:chat', parsed);
           }
-          instance.emit('mynbot:chat', parsed);
+          handleAutoLogin(username, instance, msg, 'chat');
+          handleAutoAccept(username, instance, msg, parsed);
+          handleAutoChat(username, instance, msg, parsed);
+        } catch (error) {
+          logLine(username, `Sohbet mesajı işleme hatası: ${String(error?.message || error)}`);
         }
-        handleAutoLogin(username, instance, msg, 'chat');
-        handleAutoAccept(username, instance, msg, parsed);
-        handleAutoChat(username, instance, msg, parsed);
       });
       instance.on('resourcePack', (arg1, arg2, arg3) => {
         if (!current()) return;
@@ -1518,11 +1954,12 @@ process.on('message', payload => {
       instance.on('error', error => {
         if (!current()) return;
         const msg = error?.message || String(error);
+        const isNonFatalProtocolErr = /Parse error|Serialization error|PartialReadError/i.test(msg);
         logLine(username, `Protokol/bağlantı hatası: ${msg}`);
-        if (!loggedIn) {
+        if (!loggedIn && !isNonFatalProtocolErr) {
           failure = msg;
           failureReported = true;
-          status(username, 'error', failure);
+          status(username, 'error', failure, currentSessionId);
         } else {
           send({ type: 'operation-error', username, message: msg });
         }
@@ -1539,15 +1976,21 @@ process.on('message', payload => {
       });
       instance.once('end', reason => {
         if (!current()) return;
+        if (pluginState.limboTimer) {
+          clearTimeout(pluginState.limboTimer);
+          pluginState.limboTimer = null;
+        }
+        botConnectionStates.delete(username);
         seenResourcePacks.clear();
         cleanupPlugins(username, instance);
         bots.delete(username);
-        if (!failureReported) status(username, failure ? 'error' : 'disconnected', failure || (reason ? formatReason(reason) : undefined));
+        if (!failureReported) status(username, failure ? 'error' : 'disconnected', failure || (reason ? formatReason(reason) : undefined), currentSessionId);
       });
     } catch (error) {
+      botConnectionStates.delete(username);
       cleanupPlugins(username, null);
       bots.delete(username);
-      status(username, 'error', String(error));
+      status(username, 'error', String(error), currentSessionId);
     }
     }; // end startBotInstance
 
@@ -1560,17 +2003,21 @@ process.on('message', payload => {
         startBotInstance({ ...bot, version: resolvedVersion });
       }).catch(error => {
         if (connectTokens.get(username) !== token) return;
+        botConnectionStates.delete(username);
         cleanupPlugins(username, null);
         bots.delete(username);
-        status(username, 'error', `Sunucuya erişilemedi: ${error?.message || String(error)}`);
+        status(username, 'error', `Sunucuya erişilemedi: ${error?.message || String(error)}`, currentSessionId);
       });
     }
   } else if (action === 'disconnect') {
+    const activeSid = activeSessionIds.get(username);
+    if (sessionId != null && activeSid != null && activeSid !== sessionId) return;
     connectTokens.set(username, (connectTokens.get(username) || 0) + 1);
+    botConnectionStates.delete(username);
     const instance = bots.get(username);
     cleanupPlugins(username, instance);
-    if (instance) { bots.delete(username); instance.quit(); }
-    status(username, 'disconnected');
+    if (instance) { bots.delete(username); safeQuit(instance); }
+    status(username, 'disconnected', undefined, sessionId ?? activeSid);
   } else if (action === 'update-plugins') {
     const state = getState(username);
     const prevScripts = JSON.stringify(state.loadedScripts || []);
@@ -1653,22 +2100,12 @@ process.on('message', payload => {
       if (typeof instance.lookAt === 'function') {
         try { await instance.lookAt(center, false); } catch { /* ignore */ }
       }
-      if (typeof instance.openBlock === 'function') {
-        try {
-          const openPromise = instance.openBlock(block);
-          const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 4000));
-          await Promise.race([openPromise, timeoutPromise]);
-        } catch (err) {
-          if (err && err.message === 'timeout' && typeof instance.activateBlock === 'function') {
-            await instance.activateBlock(block);
-          } else if (typeof instance.activateBlock === 'function') {
-            await instance.activateBlock(block);
-          } else {
-            throw err;
-          }
+      try {
+        await openBlockWindow(instance, block, 4000);
+      } catch (err) {
+        if (!err || err.message !== 'timeout') {
+          throw err;
         }
-      } else if (typeof instance.activateBlock === 'function') {
-        await instance.activateBlock(block);
       }
       inventory(username, instance);
     });
@@ -1908,14 +2345,14 @@ process.on('message', payload => {
             try { await instance.lookAt(entity.position.offset(0, eyeY, 0), true); } catch {}
           }
           try {
-            if (typeof instance.useOn === 'function') {
-              instance.useOn(entity);
-            } else if (typeof instance.activateEntity === 'function') {
+            if (typeof instance.activateEntity === 'function') {
               instance.activateEntity(entity);
+            } else if (typeof instance.useOn === 'function') {
+              instance.useOn(entity);
             }
           } catch {
-            if (typeof instance.activateEntity === 'function') {
-              try { instance.activateEntity(entity); } catch {}
+            if (typeof instance.useOn === 'function') {
+              try { instance.useOn(entity); } catch {}
             }
           }
           setTimeout(() => {
@@ -1939,8 +2376,10 @@ process.on('message', payload => {
     const instance = bots.get(username);
     try {
       if (!instance) throw new Error('Bot bağlı değil.');
-      if (action === 'chat') instance.chat(message);
-      else { getState(username).automation?.manual(); instance.setQuickBarSlot(slot); inventory(username, instance); }
+      if (action === 'chat') {
+        if (!isPlayState(instance)) throw new Error('Sunucu yapılandırma aşamasında, sohbet gönderilemez.');
+        instance.chat(message);
+      } else { getState(username).automation?.manual(); instance.setQuickBarSlot(slot); inventory(username, instance); }
     } catch (error) {
       send({ type: 'operation-error', username, message: String(error?.message || error) });
     }
@@ -1955,8 +2394,9 @@ process.on('message', payload => {
 
 process.on('disconnect', () => {
   for (const [username, bot] of bots.entries()) {
+    botConnectionStates.delete(username);
     cleanupPlugins(username, bot);
-    bot.quit();
+    safeQuit(bot);
   }
   process.exit(0);
 });

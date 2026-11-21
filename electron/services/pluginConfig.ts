@@ -222,6 +222,7 @@ export function validatePluginSettings(raw: unknown): BotPluginSettings {
       loginCommand: typeof login.loginCommand === 'string' && login.loginCommand.trim() ? login.loginCommand.slice(0, 256) : defaults.autoLogin.loginCommand,
       registerCommand: typeof login.registerCommand === 'string' && login.registerCommand.trim() ? login.registerCommand.slice(0, 256) : defaults.autoLogin.registerCommand,
       cooldownSeconds: clampInt(login.cooldownSeconds, defaults.autoLogin.cooldownSeconds, 1, 60),
+      listenTitleActionbar: login.listenTitleActionbar === undefined ? defaults.autoLogin.listenTitleActionbar : Boolean(login.listenTitleActionbar),
       patterns: loginPatterns,
     },
     chatPatterns,

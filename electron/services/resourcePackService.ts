@@ -266,11 +266,21 @@ export class ResourcePackService {
         }
 
         if (!buffer) {
-          const response = await fetch(url);
+          const MAX_PACK_BYTES = 50 * 1024 * 1024;
+          const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
           if (!response.ok) {
             return null;
           }
+          const contentLen = Number(response.headers.get('content-length') || 0);
+          if (contentLen > MAX_PACK_BYTES) {
+            console.warn(`[ResourcePackService] Pack exceeds 50 MB limit (${contentLen} bytes): ${url}`);
+            return null;
+          }
           const ab = await response.arrayBuffer();
+          if (ab.byteLength > MAX_PACK_BYTES) {
+            console.warn(`[ResourcePackService] Pack exceeds 50 MB limit (${ab.byteLength} bytes): ${url}`);
+            return null;
+          }
           buffer = Buffer.from(ab);
           await fs.promises.writeFile(zipPath, buffer);
         }
@@ -364,7 +374,8 @@ export class ResourcePackService {
       await Promise.allSettled(urls.map(u => this.ensurePackLoaded(u)));
     }
 
-    const cacheKey = `${itemName}:${customModelData ?? ''}`;
+    const urlKey = urls && urls.length > 0 ? urls.join('|') : [...this.packs.keys()].join('|');
+    const cacheKey = `${urlKey}::${itemName}:${customModelData ?? ''}`;
     if (this.resolvedCache.has(cacheKey)) {
       return this.resolvedCache.get(cacheKey)!;
     }

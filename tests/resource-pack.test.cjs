@@ -4,11 +4,6 @@ const { fork } = require('node:child_process');
 
 const root = path.resolve(__dirname, '..');
 const mc = require(path.join(root, 'node_modules/minecraft-protocol'));
-const mcData = require(path.join(root, 'node_modules/minecraft-data'))('1.20.4');
-
-const server = mc.createServer({ host: '127.0.0.1', port: 0, version: '1.20.4', 'online-mode': false, keepAlive: false });
-const messages = [];
-const receivedPackResponses = [];
 
 const wait = (predicate, label, timeout = 12000) => new Promise((resolve, reject) => {
   const start = Date.now();
@@ -18,15 +13,13 @@ const wait = (predicate, label, timeout = 12000) => new Promise((resolve, reject
   }, 40);
 });
 
-const packUuid = '12345678-1234-4234-8234-1234567890ab';
+async function runResourcePackScenario(version, testRemoveAndReadd) {
+  const server = mc.createServer({ host: '127.0.0.1', port: 0, version, 'online-mode': false, keepAlive: false });
+  const messages = [];
+  const receivedPackResponses = [];
+  const packUuid = '12345678-1234-4234-8234-1234567890ab';
 
-server.on('login', client => {
-  client.on('resource_pack_receive', packet => {
-    receivedPackResponses.push(packet);
-  });
-
-  // In 1.20.4, mc.createServer enters configuration phase on login; send add_resource_pack in configuration state
-  setTimeout(() => {
+  const sendPackSequence = client => {
     client.write('add_resource_pack', {
       uuid: packUuid,
       url: 'https://example.com/pack.zip',
@@ -34,12 +27,48 @@ server.on('login', client => {
       forced: true,
       hasPromptMessage: false,
     });
-  }, 150);
-});
 
-server.on('error', e => { console.error(e); process.exitCode = 1; });
+    if (testRemoveAndReadd) {
+      setTimeout(() => {
+        client.write('remove_resource_pack', { uuid: packUuid });
+        setTimeout(() => {
+          client.write('add_resource_pack', {
+            uuid: packUuid,
+            url: 'https://example.com/pack.zip',
+            hash: '0123456789abcdef0123456789abcdef01234567',
+            forced: true,
+            hasPromptMessage: false,
+          });
+        }, 120);
+      }, 250);
+    }
+  };
 
-server.on('listening', async () => {
+  if (version === '1.20.4') {
+    server.on('login', client => {
+      client.on('resource_pack_receive', packet => {
+        receivedPackResponses.push(packet);
+      });
+      setTimeout(() => sendPackSequence(client), 150);
+    });
+  } else {
+    const mcData = require(path.join(root, 'node_modules/minecraft-data'))(version);
+    server.on('playerJoin', client => {
+      client.on('resource_pack_receive', packet => {
+        receivedPackResponses.push(packet);
+      });
+      client.write('login', { ...mcData.loginPacket, entityId: client.id });
+      client.write('position', {
+        teleportId: 1,
+        x: 0, y: 64, z: 0, dx: 0, dy: 0, dz: 0, yaw: 0, pitch: 0,
+        flags: { x: false, y: false, z: false, yRot: false, xRot: false, dx: false, dy: false, dz: false, rotateDelta: false },
+      });
+      client.write('update_health', { health: 20, food: 20, foodSaturation: 5 });
+      setTimeout(() => sendPackSequence(client), 150);
+    });
+  }
+
+  await new Promise(r => server.once('listening', r));
   let worker;
   try {
     worker = fork(path.join(root, 'public/bot-worker.cjs'), [], { execPath: process.execPath, silent: true });
@@ -51,36 +80,47 @@ server.on('listening', async () => {
 
     worker.send({
       action: 'connect',
-      bot: { username: 'LocalTest', host: '127.0.0.1', port: server.socketServer.address().port, version: '1.20.4' },
+      bot: { username: 'LocalTest', host: '127.0.0.1', port: server.socketServer.address().port, version },
       plugins: {},
     });
 
-    await wait(() => receivedPackResponses.length >= 2, '2 resource_pack_receive packets');
+    const expectedCount = testRemoveAndReadd ? 4 : 2;
+    await wait(() => receivedPackResponses.length >= expectedCount, `${version}: ${expectedCount} resource_pack_receive packets`);
+    await new Promise(r => setTimeout(r, 250));
 
-    // Wait briefly to ensure no extra duplicate packets or serialization errors arrive
-    await new Promise(r => setTimeout(r, 300));
-
-    assert.equal(receivedPackResponses.length, 2, 'Must send exactly 2 resource_pack_receive packets (ACCEPTED + SUCCESSFULLY_LOADED)');
-    assert.deepEqual(receivedPackResponses.map(p => p.result), [3, 0], 'Results must be [3 (ACCEPTED), 0 (SUCCESSFULLY_LOADED)]');
-    assert.match(String(receivedPackResponses[0].uuid), /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
-    assert.match(String(receivedPackResponses[1].uuid), /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+    assert.equal(receivedPackResponses.length, expectedCount, `${version}: Must send exactly ${expectedCount} resource_pack_receive packets`);
+    const expectedResults = testRemoveAndReadd ? [3, 0, 3, 0] : [3, 0];
+    assert.deepEqual(receivedPackResponses.map(p => p.result), expectedResults, `${version}: Results mismatch`);
+    for (let i = 0; i < receivedPackResponses.length; i++) {
+      assert.equal(
+        String(receivedPackResponses[i].uuid).toLowerCase(),
+        packUuid.toLowerCase(),
+        `${version}: response[${i}].uuid must match packUuid exactly (must not be 00000000-...)`
+      );
+    }
 
     const hasSerializationError = messages.some(m => (m.type === 'operation-error' || m.type === 'log' || m.type === 'status') && /serialization error/i.test(m.message || ''));
-    assert.equal(hasSerializationError, false, 'Must not emit any Serialization error');
+    assert.equal(hasSerializationError, false, `${version}: Must not emit any Serialization error`);
 
     const status = messages.filter(m => m.type === 'status').pop();
-    assert.notEqual(status.state, 'error', 'Bot must not enter error state');
+    assert.notEqual(status.state, 'error', `${version}: Bot must not enter error state`);
 
     worker.send({ action: 'disconnect', username: 'LocalTest' });
-    await wait(() => messages.some(m => m.type === 'status' && m.state === 'disconnected'), 'disconnect');
-
-    console.log('PASS: 1.20.4 add_resource_pack sends exactly ACCEPTED + SUCCESSFULLY_LOADED with valid UUID and no serialization error');
-  } catch (e) {
-    console.error(e);
-    process.exitCode = 1;
+    await wait(() => messages.some(m => m.type === 'status' && m.state === 'disconnected'), `${version}: disconnect`);
   } finally {
     worker?.kill();
     server.close();
-    setTimeout(() => process.exit(process.exitCode || 0), 150);
   }
+}
+
+(async () => {
+  await runResourcePackScenario('1.20.4', false);
+  await runResourcePackScenario('1.21.4', true);
+  await runResourcePackScenario('1.21.8', false);
+  console.log('PASS: 1.20.4, 1.21.4 and 1.21.8 add_resource_pack send exact packUuid, handle remove_resource_pack re-add, and emit no serialization errors');
+})().catch(e => {
+  console.error(e);
+  process.exitCode = 1;
+}).finally(() => {
+  setTimeout(() => process.exit(process.exitCode || 0), 150);
 });

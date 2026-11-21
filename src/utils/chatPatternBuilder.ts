@@ -22,11 +22,13 @@ function buildSenderPrefix(prefix: string): string {
   return escapeFixed(prefix);
 }
 
+const DECORATIVE_CHAR_RE = /^[-=~_*•·+|<>#.\s━═─▬┄┈┆┊┃│┌┐└┘├┤┬┴┼✦✧★☆»«▪▫◆◇■□●○]+$/;
+
 function buildDecorativeLine(line: string): string {
   const trimmed = line.trim();
   if (!trimmed) return '^\\s*$';
   const escaped = escapeRegex(trimmed)
-    .replace(/(?:\\-|\\=|\\~|_){3,}/g, '[-=~_]{2,}')
+    .replace(/(?:[-=~_━═─▬┄┈┆┊┃│┌┐└┘├┤┬┴┼✦✧★☆»«▪▫◆◇■□●○•·]|\\\*){3,}/gu, '[-=~_*━═─▬┄┈┆┊┃│┌┐└┘├┤┬┴┼✦✧★☆»«▪▫◆◇■□●○•·]{2,}')
     .replace(/(\\\s|\s)+/g, '\\s+');
   return `^\\s*${escaped}\\s*$`;
 }
@@ -155,11 +157,17 @@ function escapeFlex(value: string): string {
 
 function buildLoginLineRegex(line: string, triggerText: string): string {
   const trimmed = line.trim();
-  if (!trimmed || /^[-=~_*•·+|<>#.\s]+$/.test(trimmed)) {
+  if (!trimmed || DECORATIVE_CHAR_RE.test(trimmed)) {
     return buildDecorativeLine(line);
   }
   if (triggerText && trimmed.toLowerCase().includes(triggerText.toLowerCase())) {
     return `^.*${escapeFlex(triggerText)}.*$`;
+  }
+  if (!triggerText) {
+    const cmdMatch = /(\/(?:login|register|l|reg))\b/i.exec(trimmed);
+    if (cmdMatch) {
+      return `^.*${escapeRegex(cmdMatch[1])}\\b.*$`;
+    }
   }
   return `^\\s*${escapeFlex(trimmed)}\\s*$`;
 }

@@ -1,23 +1,37 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { BotConfig, BotPluginSettings } from '../../src/types/bot';
-import { SUPPORTED_VERSION_SET } from '../../src/utils/supportedVersions';
+import { DEFAULT_VERSION, SUPPORTED_VERSION_SET } from '../../src/utils/supportedVersions';
 import { validatePluginSettings } from './pluginConfig';
 
 export function validateBot(value: BotConfig): BotConfig {
   if (!value || typeof value.username !== 'string' || !/^[a-zA-Z0-9_]{3,16}$/.test(value.username)) throw new Error('Kullanıcı adı 3–16 harf, rakam veya alt çizgi içermeli.');
   if (typeof value.host !== 'string' || !value.host.trim() || value.host.length > 253 || /\s/.test(value.host)) throw new Error('Geçerli bir sunucu adresi girin.');
-  if (!Number.isInteger(value.port) || value.port < 1 || value.port > 65535) throw new Error('Port 1 ile 65535 arasında olmalı.');
+  let parsedHost = value.host.trim();
+  let parsedPort = value.port;
+  const hostPortMatch = /^(?:\[([^\]]+)\]|([^:\s]+)):(\d+)$/.exec(parsedHost);
+  if (hostPortMatch) {
+    const candidateHost = (hostPortMatch[1] || hostPortMatch[2] || '').trim();
+    const candidatePort = Number(hostPortMatch[3]);
+    if (!candidateHost || !Number.isInteger(candidatePort) || candidatePort < 1 || candidatePort > 65535) {
+      throw new Error('Geçerli bir sunucu adresi ve port (1–65535) girin.');
+    }
+    parsedHost = candidateHost;
+    parsedPort = candidatePort;
+  } else if (parsedHost.includes(':') && !/^\[.*\]$/.test(parsedHost)) {
+    throw new Error('Sunucu adresi:port biçimi geçersiz (ör. play.sunucu.com:25565).');
+  }
+  if (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535) throw new Error('Port 1 ile 65535 arasında olmalı.');
   const trimmedVersion = typeof value.version === 'string' ? value.version.trim() : '';
   if (value.version !== undefined && typeof value.version !== 'string') throw new Error('Geçersiz sürüm.');
   if (trimmedVersion && !SUPPORTED_VERSION_SET.has(trimmedVersion)) {
-    throw new Error('Desteklenen sürümler: 1.8.8 – 1.21.8');
+    throw new Error(`Şu an yalnızca ${DEFAULT_VERSION} sürümü destekleniyor.`);
   }
   return {
     username: value.username,
-    host: value.host.trim(),
-    port: value.port,
-    ...(trimmedVersion ? { version: trimmedVersion } : {}),
+    host: parsedHost,
+    port: parsedPort,
+    version: trimmedVersion || DEFAULT_VERSION,
     plugins: validatePluginSettings(value.plugins),
   };
 }
@@ -29,7 +43,16 @@ export class BotRepository {
     try {
       const data: unknown = JSON.parse(await fs.readFile(this.file, 'utf8'));
       if (!Array.isArray(data)) throw new Error('Kayıt listesi geçersiz.');
-      this.bots = data.map(validateBot);
+      this.bots = data.map(entry => {
+        if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+          const rec = entry as BotConfig;
+          const ver = typeof rec.version === 'string' ? rec.version.trim() : '';
+          if (!ver || !SUPPORTED_VERSION_SET.has(ver)) {
+            return validateBot({ ...rec, version: DEFAULT_VERSION });
+          }
+        }
+        return validateBot(entry as BotConfig);
+      });
       if (new Set(this.bots.map(bot => bot.username.toLowerCase())).size !== this.bots.length) throw new Error('Tekrarlanan kullanıcı adı.');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;

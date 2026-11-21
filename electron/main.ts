@@ -207,9 +207,18 @@ app.whenReady().then(async () => {
   });
   ipcMain.handle('resolve-resource-pack-texture', async (_event, itemName: string, customModelData?: number) => {
     const urls = new Set<string>();
-    for (const d of Object.values(bots.data)) {
+    for (const [username, d] of Object.entries(bots.data)) {
+      const st = bots.statuses[username]?.state;
+      if (st !== 'connected' && st !== 'connecting') continue;
       if (Array.isArray(d?.resourcePacks)) {
         for (const u of d.resourcePacks) if (typeof u === 'string' && u) urls.add(u);
+      }
+    }
+    if (urls.size === 0) {
+      for (const d of Object.values(bots.data)) {
+        if (Array.isArray(d?.resourcePacks)) {
+          for (const u of d.resourcePacks) if (typeof u === 'string' && u) urls.add(u);
+        }
       }
     }
     return resourcePacks.resolveItemTexture(itemName, customModelData, [...urls]);

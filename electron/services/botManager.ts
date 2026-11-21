@@ -13,6 +13,9 @@ export class BotManager {
   private reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private connectTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private reconnectAttempts = new Map<string, number>();
+  private sessionIds = new Map<string, number>();
+  private nextSessionId = 0;
+  private chatEntrySeq = 0;
 
   readonly statuses: Record<string, BotStatus> = {};
   readonly data: Record<string, BotData> = {};
@@ -20,7 +23,7 @@ export class BotManager {
   constructor(private workerPath: string, private pluginsDir: string, private notify: () => void) {}
 
   private entry(username: string): BotData {
-    return this.data[username] ||= { inventory: [], cursor: null, slotCount: 0, selectedSlot: 0, chat: [], logs: [] };
+    return this.data[username] ||= { inventory: [], cursor: null, slotCount: 0, selectedSlot: 0, chat: [], loginPrompts: [], logs: [] };
   }
 
   private pushLog(username: string, line: string) {
@@ -53,6 +56,8 @@ export class BotManager {
     data.world = undefined;
     data.openWindow = null;
     data.automation = undefined;
+    data.resourcePacks = undefined;
+    data.lastActionbar = undefined;
     data.lastError = undefined;
   }
 
@@ -102,11 +107,32 @@ export class BotManager {
   }
 
   private runtime(): string {
-    const candidates = [process.env.MYNBOT_NODE, 'node'];
-    const nvm = path.join(os.homedir(), '.local/share/nvm');
-    try { for (const name of readdirSync(nvm).sort().reverse()) if (/^v\d/.test(name)) candidates.push(path.join(nvm, name, 'bin/node')); } catch { /* optional runtime location */ }
+    const candidates: Array<string | undefined> = [process.env.MYNBOT_NODE, 'node'];
+    const nvmDirs = [
+      path.join(os.homedir(), '.local/share/nvm'),
+      path.join(os.homedir(), '.nvm/versions/node'),
+    ];
+    for (const nvm of nvmDirs) {
+      try {
+        for (const name of readdirSync(nvm).sort().reverse()) {
+          if (/^v\d/.test(name)) candidates.push(path.join(nvm, name, 'bin/node'));
+        }
+      } catch { /* optional runtime location */ }
+    }
+    if (process.platform === 'win32') {
+      const pf = process.env.ProgramFiles || 'C:\\Program Files';
+      const pf86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+      candidates.push(path.join(pf, 'nodejs', 'node.exe'), path.join(pf86, 'nodejs', 'node.exe'));
+      if (process.env.LOCALAPPDATA) candidates.push(path.join(process.env.LOCALAPPDATA, 'Programs', 'nodejs', 'node.exe'));
+      if (process.env.NVM_SYMLINK) candidates.push(path.join(process.env.NVM_SYMLINK, 'node.exe'));
+    } else {
+      candidates.push('/usr/local/bin/node', '/opt/homebrew/bin/node', '/usr/bin/node');
+    }
+    const seen = new Set<string>();
     for (const candidate of candidates) {
-      if (!candidate) continue;
+      if (!candidate || seen.has(candidate)) continue;
+      seen.add(candidate);
+      if (candidate !== 'node' && path.isAbsolute(candidate) && !existsSync(candidate)) continue;
       const result = spawnSync(candidate, ['-p', 'process.versions.node'], { encoding: 'utf8', timeout: 3000, env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined } });
       if (result.status === 0 && Number(result.stdout.trim().split('.')[0]) >= 22) return candidate;
     }
@@ -125,11 +151,13 @@ export class BotManager {
     worker.on('message', (value: unknown) => {
       const msg = value as {
         requestId?: number;
+        sessionId?: number;
         cursor?: BotData['cursor'];
         slotCount?: number;
         type: string;
         username: string;
         state: BotStatus['state'];
+        source?: 'chat' | 'title' | 'subtitle' | 'actionbar';
         reason?: string;
         message?: string;
         text?: string;
@@ -149,7 +177,11 @@ export class BotManager {
       }
       if (typeof msg.username !== 'string') return;
       const data = this.entry(msg.username);
+      const isBotActive = this.statuses[msg.username]?.state === 'connected' || this.statuses[msg.username]?.state === 'connecting';
       if (msg.type === 'status' && ['connecting', 'connected', 'disconnected', 'error'].includes(msg.state)) {
+        if (msg.sessionId != null && this.sessionIds.get(msg.username) !== msg.sessionId) {
+          return;
+        }
         this.statuses[msg.username] = { state: msg.state, message: msg.message };
         this.pushLog(msg.username, msg.message || ({ connecting: 'Bağlanıyor', connected: 'Bağlantı kuruldu', disconnected: 'Bağlantı kapatıldı', error: 'Bağlantı hatası' } as const)[msg.state]);
         if (msg.state === 'connected') {
@@ -162,20 +194,41 @@ export class BotManager {
           this.clearBotData(msg.username);
           this.scheduleReconnect(msg.username);
         }
-      } else if (msg.type === 'automation' && this.statuses[msg.username]?.state === 'connected') {
+      } else if (msg.type === 'automation' && isBotActive) {
         data.automation = msg.automation;
-      } else if (msg.type === 'inventory' && this.statuses[msg.username]?.state === 'connected') {
+      } else if (msg.type === 'inventory' && isBotActive) {
         data.inventory = msg.inventory || [];
         data.selectedSlot = msg.selectedSlot || 0;
         data.cursor = msg.cursor || null;
         data.slotCount = msg.slotCount || 0;
         data.openWindow = msg.openWindow ?? null;
-      } else if (msg.type === 'pose' && this.statuses[msg.username]?.state === 'connected') {
+      } else if (msg.type === 'pose' && isBotActive) {
         if (msg.pose) data.pose = msg.pose;
-      } else if (msg.type === 'world' && this.statuses[msg.username]?.state === 'connected') {
+      } else if (msg.type === 'world' && isBotActive) {
         if (msg.world) data.world = msg.world;
       } else if (msg.type === 'chat' && msg.text) {
-        data.chat = [...data.chat, { text: msg.text, ...(msg.segments?.length ? { segments: msg.segments } : {}) }].slice(-200);
+        const seq = ++this.chatEntrySeq;
+        data.chat = [...data.chat, { id: `c-${seq}`, text: msg.text, ...(msg.segments?.length ? { segments: msg.segments } : {}) }].slice(-200);
+        const prompts = data.loginPrompts || [];
+        data.loginPrompts = [
+          ...prompts,
+          { id: `lp-${seq}`, text: msg.text, source: 'chat' as const, at: Date.now(), ...(msg.segments?.length ? { segments: msg.segments } : {}) },
+        ].slice(-30);
+      } else if ((msg.type === 'title' || msg.type === 'actionbar') && msg.text) {
+        const source: 'actionbar' | 'subtitle' | 'title' = msg.type === 'actionbar' ? 'actionbar' : (msg.source === 'subtitle' ? 'subtitle' : 'title');
+        if (source === 'actionbar') data.lastActionbar = msg.text;
+        const prompts = data.loginPrompts || [];
+        const now = Date.now();
+        const prev = prompts[prompts.length - 1];
+        if (prev && prev.source === source && prev.text === msg.text && now - prev.at < 2000) {
+          data.loginPrompts = [...prompts.slice(0, -1), { ...prev, at: now }];
+        } else {
+          const seq = ++this.chatEntrySeq;
+          data.loginPrompts = [
+            ...prompts,
+            { id: `lp-${seq}`, text: msg.text, source, at: now, ...(msg.segments?.length ? { segments: msg.segments } : {}) },
+          ].slice(-30);
+        }
       } else if (msg.type === 'resource-pack' && msg.url) {
         const list = data.resourcePacks || [];
         if (!list.includes(msg.url)) data.resourcePacks = [...list, msg.url];
@@ -189,7 +242,6 @@ export class BotManager {
         const errText = msg.message || 'İşlem başarısız';
         this.pushLog(msg.username, errText);
         data.lastError = errText;
-        this.statuses[msg.username] = { ...this.statuses[msg.username], message: msg.message };
       }
       this.notify();
     });
@@ -221,18 +273,21 @@ export class BotManager {
     if (!keepAttemptCount) this.reconnectAttempts.delete(bot.username);
     this.configs.set(bot.username, bot);
     this.start();
+    const sessionId = ++this.nextSessionId;
+    this.sessionIds.set(bot.username, sessionId);
     this.statuses[bot.username] = { state: 'connecting' };
     this.notify();
     const { plugins, ...connection } = bot;
-    this.send({ action: 'connect', bot: connection, plugins, pluginsDir: this.pluginsDir });
+    this.send({ action: 'connect', bot: connection, plugins, pluginsDir: this.pluginsDir, sessionId });
     const timer = setTimeout(() => {
       this.connectTimers.delete(bot.username);
-      if (this.statuses[bot.username]?.state !== 'connecting') return;
+      if (this.sessionIds.get(bot.username) !== sessionId || this.statuses[bot.username]?.state !== 'connecting') return;
+      this.sessionIds.set(bot.username, ++this.nextSessionId);
       this.statuses[bot.username] = { state: 'error', message: 'Bağlantı zaman aşımı' };
       this.pushLog(bot.username, 'Bağlantı zaman aşımı (30 sn).');
       this.clearBotData(bot.username);
       if (this.worker?.connected) {
-        try { this.send({ action: 'disconnect', username: bot.username }); } catch { /* ignore */ }
+        try { this.send({ action: 'disconnect', username: bot.username, sessionId }); } catch { /* ignore */ }
       }
       this.scheduleReconnect(bot.username);
       this.notify();
@@ -254,7 +309,9 @@ export class BotManager {
     this.clearReconnect(username);
     this.clearConnectTimer(username);
     this.reconnectAttempts.delete(username);
-    if (this.worker?.connected) this.send({ action: 'disconnect', username });
+    const oldSessionId = this.sessionIds.get(username);
+    this.sessionIds.set(username, ++this.nextSessionId);
+    if (this.worker?.connected) this.send({ action: 'disconnect', username, ...(oldSessionId != null ? { sessionId: oldSessionId } : {}) });
     this.clearBotData(username);
     this.statuses[username] = { state: 'disconnected' };
     this.notify();

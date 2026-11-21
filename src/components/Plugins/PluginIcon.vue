@@ -11,7 +11,13 @@ const props = withDefaults(defineProps<{ icon?: string; size?: number }>(), {
 const imgFailed = ref(false);
 watch(() => props.icon, () => { imgFailed.value = false; });
 const lucideName = (value: string) => value.startsWith('icon:') ? value.slice(5) : value;
-const LUCIDE_NAMES = new Set(['Plug', 'Code', 'Settings', 'RefreshCw', 'Footprints', 'MessageSquare', 'Target', 'BookOpen', 'Drumstick', 'Swords', 'Shield', 'Zap', 'Bot', 'Info', 'ScanLine']);
+const LUCIDE_NAMES = new Set([
+  'Plug', 'Code', 'Settings', 'RefreshCw', 'Footprints', 'MessageSquare', 'Target', 'BookOpen',
+  'Drumstick', 'Swords', 'Shield', 'ShieldAlert', 'Zap', 'Bot', 'Info', 'ScanLine',
+  'KeyRound', 'Compass', 'Check', 'Box', 'Lock', 'UserCheck', 'Clock', 'PackageOpen',
+  'Fish', 'Heart', 'Navigation', 'Layers', 'Flame', 'Hammer', 'Axe', 'Hand', 'Eye',
+  'Crosshair', 'SlidersHorizontal', 'FileCode', 'Power', 'AlertTriangle',
+]);
 const isLucide = (value: string) => value.startsWith('icon:') || LUCIDE_NAMES.has(value);
 </script>
 

@@ -600,6 +600,12 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
                 <label for="register-cmd">{{ t('plugins.autoLogin.registerCommand') }}</label>
                 <input id="register-cmd" v-model="draft.autoLogin.registerCommand" maxlength="256" placeholder="/register {password} {password}" />
               </div>
+              <div class="checkbox-stack">
+                <label class="check-item">
+                  <input v-model="draft.autoLogin.listenTitleActionbar" type="checkbox" />
+                  {{ L('Title / Subtitle / Actionbar mesajlarını da dinle', 'Also listen to Title / Subtitle / Actionbar messages') }}
+                </label>
+              </div>
             </div>
             <div class="login-calibrator-wrap">
               <LoginCalibrator
@@ -632,7 +638,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown));
               </div>
               <p class="plugins-note">
                 {{ connected
-                  ? L('Bot şu an bağlı: harici .js / .cjs değişiklikleri bir sonraki bağlantıda etkinleşir.', 'Bot is currently connected: external .js / .cjs changes will take effect on next connection.')
+                  ? L('Bot şu an bağlı: eklentiyi açıp kapattığınızda değişiklikler canlı uygulanır; dosya içeriğini düzenlediyseniz Yenile düğmesine basın.', 'Bot is currently connected: toggling scripts applies live; if you edited the file on disk, click Refresh.')
                   : L('Mineflayer (bot, ctx) veya { setup(bot, ctx) } biçimindeki dosyalar ayrı worker sürecinde çalışır.', 'Mineflayer (bot, ctx) or { setup(bot, ctx) } files execute in a separate worker process.') }}
               </p>
               <div class="script-danger-row">

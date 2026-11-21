@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import type { ChatEntry, LoginPatternAction, LoginPatternRule } from '../../types/bot';
+import type { ChatSegment, LoginPatternAction, LoginPatternRule, LoginPromptEntry, LoginPromptSource } from '../../types/bot';
 import { buildLoginPattern, testLoginPattern } from '../../utils/chatPatternBuilder';
 import { useBotStore } from '../../store/botStore';
 import { useI18n } from '../../i18n';
@@ -11,25 +11,73 @@ const emit = defineEmits<{ add: [rule: LoginPatternRule]; remove: [id: string] }
 const store = useBotStore();
 const { L } = useI18n();
 
-const recentEntries = computed<ChatEntry[]>(() => (store.data[props.username]?.chat || []).slice(-25));
-const recentChat = computed(() => recentEntries.value.map(entry => entry.text.trim()));
-const selectedIndices = ref<number[]>([]);
+const liveEntries = computed<LoginPromptEntry[]>(() => {
+  const data = store.data[props.username];
+  if (data?.loginPrompts?.length) return data.loginPrompts.slice(-25);
+  return (data?.chat || []).slice(-25).map((entry, idx) => ({
+    id: entry.id || `c-${idx}-${entry.text.slice(0, 16)}`,
+    text: entry.text,
+    source: 'chat' as const,
+    at: 0,
+    ...(entry.segments ? { segments: entry.segments } : {}),
+  }));
+});
+
+const frozen = ref(false);
+const frozenEntries = ref<LoginPromptEntry[]>([]);
+const recentEntries = computed<LoginPromptEntry[]>(() => (frozen.value ? frozenEntries.value : liveEntries.value));
+const selectedIds = ref<string[]>([]);
 const patternAction = ref<LoginPatternAction>('login');
 const patternName = ref('');
 const triggerText = ref('');
 
-function toggleLine(index: number) {
-  const pos = selectedIndices.value.indexOf(index);
-  if (pos >= 0) selectedIndices.value.splice(pos, 1);
-  else if (selectedIndices.value.length < 8) selectedIndices.value.push(index);
-  selectedIndices.value.sort((a, b) => a - b);
+function toggleFreeze() {
+  if (!frozen.value) {
+    frozenEntries.value = [...liveEntries.value];
+    frozen.value = true;
+  } else {
+    frozen.value = false;
+    frozenEntries.value = [];
+  }
 }
 
-const selectedLines = computed(() =>
-  selectedIndices.value
-    .filter(i => i >= 0 && i < recentChat.value.length)
-    .map(i => recentChat.value[i])
+function toggleLine(id: string) {
+  const pos = selectedIds.value.indexOf(id);
+  if (pos >= 0) selectedIds.value.splice(pos, 1);
+  else if (selectedIds.value.length < 8) selectedIds.value.push(id);
+}
+
+const selectedEntries = computed(() =>
+  recentEntries.value.filter(entry => selectedIds.value.includes(entry.id))
 );
+const selectedLines = computed(() => selectedEntries.value.map(entry => entry.text.trim()));
+
+const suggestedTrigger = computed(() => {
+  if (triggerText.value.trim() || !selectedLines.value.length) return '';
+  const joined = selectedLines.value.join(' ');
+  const cmdMatch = /(\/(?:login|register|l|reg))\b/i.exec(joined);
+  if (cmdMatch) return cmdMatch[1];
+  const kwMatch = /\b(giriş|kayıt|login|register|şifre|password)\b/i.exec(joined);
+  return kwMatch ? kwMatch[1] : '';
+});
+
+function sourceLabel(source: LoginPromptSource): string {
+  switch (source) {
+    case 'title': return 'Title';
+    case 'subtitle': return 'Subtitle';
+    case 'actionbar': return 'Actionbar';
+    default: return 'Chat';
+  }
+}
+
+function segmentStyle(seg: ChatSegment) {
+  return {
+    color: seg.color || '#ffffff',
+    fontWeight: seg.bold ? 'bold' : undefined,
+    fontStyle: seg.italic ? 'italic' : undefined,
+    textDecoration: [seg.underlined ? 'underline' : '', seg.strikethrough ? 'line-through' : ''].filter(Boolean).join(' ') || undefined,
+  };
+}
 
 const preview = computed(() => {
   if (!selectedLines.value.length) return null;
@@ -47,7 +95,7 @@ const preview = computed(() => {
 function savePattern() {
   if (!preview.value?.rule || !preview.value.test?.matched) return;
   emit('add', preview.value.rule);
-  selectedIndices.value = [];
+  selectedIds.value = [];
   patternName.value = '';
   triggerText.value = '';
 }
@@ -58,34 +106,35 @@ function savePattern() {
     <div class="module-head">
       <div>
         <h3>{{ L('Giriş / Kayıt Kalıbı Kalibratörü', 'Login / Register Pattern Calibrator') }}</h3>
-        <p>{{ L('Sunucunun giriş veya kayıt istediği tek ya da çok satırlı sohbet mesajını seçerek otomatik algılamayı öğret.', 'Teach automatic detection by selecting the single or multi-line server prompt requesting login or registration.') }}</p>
+        <p>{{ L('Sunucunun giriş veya kayıt istediği tek ya da çok satırlı sohbet, Title veya Actionbar mesajını seçerek otomatik algılamayı öğret.', 'Teach automatic detection by selecting the single or multi-line chat, Title, or Actionbar prompt requesting login or registration.') }}</p>
       </div>
     </div>
 
     <div class="calibrator-chat-box">
       <div class="calibrator-chat-head">
-        <span>{{ L('Anlık Sohbetten Giriş Mesajı Seç', 'Select Login Message from Live Chat') }} ({{ selectedLines.length }} {{ L('satır seçili', 'lines selected') }})</span>
-        <button v-if="selectedLines.length" type="button" class="secondary compact" @click="selectedIndices = []">{{ L('Seçimi temizle', 'Clear selection') }}</button>
+        <span>{{ L('Gelen Mesajlardan Seç (Chat / Title / Actionbar)', 'Select from Incoming Prompts (Chat / Title / Actionbar)') }} ({{ selectedLines.length }} {{ L('satır seçili', 'lines selected') }})</span>
+        <div class="plugins-toolbar">
+          <button type="button" class="secondary compact" @click="toggleFreeze">
+            {{ frozen ? L('Listeyi çöz', 'Unfreeze list') : L('Listeyi dondur', 'Freeze list') }}
+          </button>
+          <button v-if="selectedLines.length" type="button" class="secondary compact" @click="selectedIds = []">{{ L('Seçimi temizle', 'Clear selection') }}</button>
+        </div>
       </div>
       <div v-if="recentEntries.length" class="calibrator-lines mc-chat-output">
         <label
-          v-for="(entry, index) in recentEntries"
-          :key="`${index}-${entry.text.slice(0, 16)}`"
+          v-for="entry in recentEntries"
+          :key="entry.id"
           class="calibrator-line"
-          :class="{ chosen: selectedIndices.includes(index) }"
+          :class="{ chosen: selectedIds.includes(entry.id) }"
         >
-          <input type="checkbox" :checked="selectedIndices.includes(index)" @change="toggleLine(index)" />
+          <input type="checkbox" :checked="selectedIds.includes(entry.id)" @change="toggleLine(entry.id)" />
+          <span class="pattern-meta" style="margin-right: 6px; opacity: 0.8;">[{{ sourceLabel(entry.source) }}]</span>
           <span class="calibrator-line-text">
             <template v-if="entry.segments?.length">
               <span
                 v-for="(seg, j) in entry.segments"
                 :key="j"
-                :style="{
-                  color: seg.color || '#ffffff',
-                  fontWeight: seg.bold ? 'bold' : undefined,
-                  fontStyle: seg.italic ? 'italic' : undefined,
-                  textDecoration: [seg.underlined ? 'underline' : '', seg.strikethrough ? 'line-through' : ''].filter(Boolean).join(' ') || undefined
-                }"
+                :style="segmentStyle(seg)"
               >{{ j === 0 ? seg.text.trimStart() : seg.text }}</span>
             </template>
             <template v-else>{{ entry.text.trimStart() }}</template>
@@ -93,7 +142,7 @@ function savePattern() {
         </label>
       </div>
       <p v-else class="empty-copy">
-        {{ connected ? L('Henüz gelen sohbet satırı yok. Sunucudan giriş/kayıt mesajı geldiğinde burada görünür.', 'No incoming chat lines yet. Server login/register prompts will appear here.') : L('Canlı sohbet satırlarını görmek için sunucuya bağlan.', 'Connect to server to view live chat lines.') }}
+        {{ connected ? L('Henüz gelen sohbet, Title veya Actionbar satırı yok. Sunucudan giriş/kayıt mesajı geldiğinde burada görünür.', 'No incoming chat, Title, or Actionbar lines yet. Server login/register prompts will appear here.') : L('Canlı mesaj satırlarını görmek için sunucuya bağlan.', 'Connect to server to view live prompt lines.') }}
       </p>
     </div>
 
@@ -112,6 +161,15 @@ function savePattern() {
       <div>
         <label for="lpat-trigger">{{ L('Anahtar İbare (isteğe bağlı)', 'Key Phrase (optional)') }}</label>
         <input id="lpat-trigger" v-model="triggerText" maxlength="128" :placeholder="L('Örn: /login veya giriş yap', 'e.g. /login or please login')" />
+        <button
+          v-if="suggestedTrigger"
+          type="button"
+          class="secondary compact"
+          style="margin-top: 4px;"
+          @click="triggerText = suggestedTrigger"
+        >
+          {{ L('Önerilen:', 'Suggested:') }} {{ suggestedTrigger }}
+        </button>
       </div>
     </div>
 

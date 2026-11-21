@@ -72,6 +72,7 @@ function cloneSettings(source?: BotPluginSettings): BotPluginSettings {
 
 const bot = computed(() => store.bots.find(item => item.username === props.username));
 const draft = ref<BotPluginSettings>(cloneSettings(bot.value?.plugins));
+const lastSyncedJson = ref(JSON.stringify(draft.value));
 const busy = ref(false);
 const savedMessage = ref('');
 const searchQuery = ref('');
@@ -80,7 +81,14 @@ const activeModuleId = ref<string | null>(null);
 
 watch(
   () => bot.value?.plugins,
-  value => { if (!busy.value) draft.value = cloneSettings(value); },
+  value => {
+    if (busy.value || activeModuleId.value !== null) return;
+    const next = cloneSettings(value);
+    const nextJson = JSON.stringify(next);
+    if (nextJson === lastSyncedJson.value) return;
+    lastSyncedJson.value = nextJson;
+    draft.value = next;
+  },
   { deep: true }
 );
 
@@ -319,7 +327,9 @@ async function persist(notice?: string) {
   savedMessage.value = '';
   emit('error', '');
   try {
-    await api.updatePlugins(props.username, cloneSettings(draft.value));
+    const payload = cloneSettings(draft.value);
+    lastSyncedJson.value = JSON.stringify(payload);
+    await api.updatePlugins(props.username, payload);
     await store.refresh();
     savedMessage.value = notice || L('Eklenti ayarları kaydedildi.', 'Plugin settings saved.');
   } catch (err) {

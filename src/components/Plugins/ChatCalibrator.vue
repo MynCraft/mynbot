@@ -11,9 +11,16 @@ const emit = defineEmits<{ add: [rule: ChatPatternRule]; remove: [id: string] }>
 const store = useBotStore();
 const { L } = useI18n();
 
-const recentEntries = computed<ChatEntry[]>(() => (store.data[props.username]?.chat || []).slice(-25));
-const recentChat = computed(() => recentEntries.value.map(entry => entry.text.trim()));
-const selectedIndices = ref<number[]>([]);
+const liveEntries = computed<ChatEntry[]>(() =>
+  (store.data[props.username]?.chat || []).slice(-25).map((entry, idx) => ({
+    ...entry,
+    id: entry.id || `c-${idx}-${entry.text.slice(0, 16)}`,
+  }))
+);
+const frozen = ref(false);
+const frozenEntries = ref<ChatEntry[]>([]);
+const recentEntries = computed<ChatEntry[]>(() => (frozen.value ? frozenEntries.value : liveEntries.value));
+const selectedIds = ref<string[]>([]);
 const patternType = ref<ChatPatternType>('pm');
 const patternName = ref('');
 const senderText = ref('');
@@ -21,6 +28,16 @@ const messageText = ref('');
 const magicCode = ref('');
 const listeningMagic = ref(false);
 const copied = ref(false);
+
+function toggleFreeze() {
+  if (!frozen.value) {
+    frozenEntries.value = [...liveEntries.value];
+    frozen.value = true;
+  } else {
+    frozen.value = false;
+    frozenEntries.value = [];
+  }
+}
 
 function generateMagicCode() {
   const code = `MYN${Math.floor(1000 + Math.random() * 9000)}`;
@@ -34,28 +51,31 @@ function generateMagicCode() {
 }
 
 watch(
-  () => recentChat.value.length,
+  () => liveEntries.value.length,
   () => {
     if (!listeningMagic.value || !magicCode.value) return;
-    const idx = recentChat.value.findIndex(line => line.includes(magicCode.value));
-    if (idx >= 0) {
-      selectedIndices.value = [idx];
+    const match = liveEntries.value.find(entry => entry.text.includes(magicCode.value));
+    if (match?.id) {
+      if (frozen.value) {
+        frozen.value = false;
+        frozenEntries.value = [];
+      }
+      selectedIds.value = [match.id];
       listeningMagic.value = false;
     }
   }
 );
 
-function toggleLine(index: number) {
-  const pos = selectedIndices.value.indexOf(index);
-  if (pos >= 0) selectedIndices.value.splice(pos, 1);
-  else selectedIndices.value.push(index);
-  selectedIndices.value.sort((a, b) => a - b);
+function toggleLine(id: string) {
+  const pos = selectedIds.value.indexOf(id);
+  if (pos >= 0) selectedIds.value.splice(pos, 1);
+  else selectedIds.value.push(id);
 }
 
 const selectedLines = computed(() =>
-  selectedIndices.value
-    .filter(i => i >= 0 && i < recentChat.value.length)
-    .map(i => recentChat.value[i])
+  recentEntries.value
+    .filter(entry => entry.id && selectedIds.value.includes(entry.id))
+    .map(entry => entry.text.trim())
 );
 
 const preview = computed(() => {
@@ -75,7 +95,7 @@ const preview = computed(() => {
 function savePattern() {
   if (!preview.value?.rule || !preview.value.test?.matched) return;
   emit('add', preview.value.rule);
-  selectedIndices.value = [];
+  selectedIds.value = [];
   patternName.value = '';
   messageText.value = '';
   magicCode.value = '';
@@ -106,16 +126,21 @@ function savePattern() {
     <div class="calibrator-chat-box">
       <div class="calibrator-chat-head">
         <span>{{ L('Anlık Sohbetten Satır Seç', 'Select Lines from Live Chat') }} ({{ selectedLines.length }} {{ L('satır seçili', 'lines selected') }})</span>
-        <button v-if="selectedLines.length" type="button" class="secondary compact" @click="selectedIndices = []">{{ L('Seçimi temizle', 'Clear selection') }}</button>
+        <div class="plugins-toolbar">
+          <button type="button" class="secondary compact" @click="toggleFreeze">
+            {{ frozen ? L('Listeyi çöz', 'Unfreeze list') : L('Listeyi dondur', 'Freeze list') }}
+          </button>
+          <button v-if="selectedLines.length" type="button" class="secondary compact" @click="selectedIds = []">{{ L('Seçimi temizle', 'Clear selection') }}</button>
+        </div>
       </div>
       <div v-if="recentEntries.length" class="calibrator-lines mc-chat-output">
         <label
-          v-for="(entry, index) in recentEntries"
-          :key="`${index}-${entry.text.slice(0, 16)}`"
+          v-for="entry in recentEntries"
+          :key="entry.id"
           class="calibrator-line"
-          :class="{ chosen: selectedIndices.includes(index), magic: magicCode && entry.text.includes(magicCode) }"
+          :class="{ chosen: entry.id && selectedIds.includes(entry.id), magic: magicCode && entry.text.includes(magicCode) }"
         >
-          <input type="checkbox" :checked="selectedIndices.includes(index)" @change="toggleLine(index)" />
+          <input type="checkbox" :checked="Boolean(entry.id && selectedIds.includes(entry.id))" @change="entry.id && toggleLine(entry.id)" />
           <span class="calibrator-line-text">
             <template v-if="entry.segments?.length">
               <span

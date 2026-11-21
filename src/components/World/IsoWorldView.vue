@@ -109,6 +109,24 @@ function getBlockColor(name: string): string {
   return `rgb(${r}, ${g}, ${b})`;
 }
 
+// Rotate screen grid coordinates (col-7, row-7) into world (dx, dz) based on headingMode
+function getSnappedQuarterTurns(): number {
+  if (headingMode.value !== 'bot') return 0;
+  const yaw = props.data.pose?.yaw ?? 0;
+  // yaw=PI -> North (0 turns); yaw=PI/2 -> West (1 turn CCW -> world left is screen up);
+  // yaw=0 -> South (2 turns); yaw=-PI/2 -> East (3 turns)
+  const raw = Math.round((Math.PI - yaw) / (Math.PI / 2));
+  return ((raw % 4) + 4) % 4;
+}
+
+function screenToWorldDelta(sx: number, sz: number): { dx: number; dz: number } {
+  const q = getSnappedQuarterTurns();
+  if (q === 1) return { dx: sz, dz: -sx };
+  if (q === 2) return { dx: -sx, dz: -sz };
+  if (q === 3) return { dx: -sz, dz: sx };
+  return { dx: sx, dz: sz };
+}
+
 // Cell lookup helpers for 15x15 radar (-7..+7)
 function getCellBlock(dx: number, dz: number): WorldBlock | null {
   const blocks = props.data.world?.blocks;
@@ -202,12 +220,14 @@ function render() {
   // Bot orientation
   const yaw = props.data.pose?.yaw ?? 0;
   const isBotHeading = headingMode.value === 'bot';
+  const quarterTurns = getSnappedQuarterTurns();
 
   // Draw Radar Cells
   for (let row = 0; row < gridCount; row++) {
     for (let col = 0; col < gridCount; col++) {
-      const dx = col - 7;
-      const dz = row - 7;
+      const sx = col - 7;
+      const sz = row - 7;
+      const { dx, dz } = screenToWorldDelta(sx, sz);
       const cellX = originX + col * cellSize;
       const cellY = originY + row * cellSize;
 
@@ -316,6 +336,7 @@ function render() {
 
         // Name tag
         ctx.font = 'bold 8px Inter, sans-serif';
+        ctx.textAlign = 'center';
         const nameWidth = ctx.measureText(entity.displayName).width;
         ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
         ctx.fillRect(cellX + cellSize / 2 - nameWidth / 2 - 2, cellY - 10, nameWidth + 4, 10);
@@ -341,8 +362,9 @@ function render() {
 
   ctx.save();
   // Vision Cone
-  const dirX = -Math.sin(yaw);
-  const dirY = Math.cos(yaw);
+  const displayYaw = isBotHeading ? yaw + quarterTurns * (Math.PI / 2) : yaw;
+  const dirX = -Math.sin(displayYaw);
+  const dirY = Math.cos(displayYaw);
   const coneLength = cellSize * 2.2;
 
   ctx.beginPath();
@@ -451,8 +473,7 @@ function onCanvasMouseMove(e: MouseEvent) {
   const row = Math.floor((my - originY) / cellSize);
 
   if (col >= 0 && col < gridCount && row >= 0 && row < gridCount) {
-    const dx = col - 7;
-    const dz = row - 7;
+    const { dx, dz } = screenToWorldDelta(col - 7, row - 7);
     const block = getCellBlock(dx, dz);
     const entity = getCellEntity(dx, dz);
     hoveredCell.value = { dx, dz, block, entity };

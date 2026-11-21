@@ -180,11 +180,16 @@ function createAutomation(bot, options) {
     }
     tick();
   }
-  function snapshotHeld() { const item = bot.heldItem; return item ? { item, type: item.type, metadata: item.metadata, name: item.name, nbt: JSON.stringify(item.nbt ?? null), durabilityUsed: item.durabilityUsed } : null; }
+  function itemComponentsKey(item) {
+    if (!item) return 'null';
+    const mapEntries = item.componentMap instanceof Map ? [...item.componentMap.entries()] : null;
+    return JSON.stringify({ nbt: item.nbt ?? null, components: item.components ?? null, map: mapEntries });
+  }
+  function snapshotHeld() { const item = bot.heldItem; return item ? { item, type: item.type, metadata: item.metadata, name: item.name, compKey: itemComponentsKey(item), durabilityUsed: item.durabilityUsed } : null; }
   async function restore(held, token, key) {
     if (!held || !valid(token, key) || blocked()) return;
     const items = bot.inventory.items();
-    const item = items.includes(held.item) ? held.item : items.find(i => i.type === held.type && i.metadata === held.metadata && i.name === held.name && JSON.stringify(i.nbt ?? null) === held.nbt && i.durabilityUsed === held.durabilityUsed);
+    const item = items.includes(held.item) ? held.item : items.find(i => i.type === held.type && i.metadata === held.metadata && i.name === held.name && itemComponentsKey(i) === held.compKey && i.durabilityUsed === held.durabilityUsed);
     if (item && bot.heldItem !== item) await bot.equip(item, 'hand');
   }
 
@@ -329,14 +334,47 @@ function createAutomation(bot, options) {
       return;
     }
     const openFn = typeof bot.openContainer === 'function' ? bot.openContainer.bind(bot) : (typeof bot.openChest === 'function' ? bot.openChest.bind(bot) : null);
-    if (!openFn) {
+    if (!openFn && typeof bot.activateBlock !== 'function') {
       report('autoChestDump', 'waiting', 'Sandık açma desteklenmiyor.');
       return;
     }
     report('autoChestDump', 'running', 'Sandığa eşya aktarılıyor...');
     let container;
+    let timedOut = false;
     try {
-      container = await openFn(chestBlock);
+      if (typeof bot.activateBlock === 'function' && typeof bot.on === 'function' && typeof bot.removeListener === 'function') {
+        container = await new Promise((resolve, reject) => {
+          let settled = false;
+          let timer = null;
+          const onOpen = win => {
+            if (settled) return;
+            settled = true;
+            if (timer) clearTimeout(timer);
+            bot.removeListener('windowOpen', onOpen);
+            resolve(win);
+          };
+          timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            bot.removeListener('windowOpen', onOpen);
+            reject(new Error('timeout'));
+          }, 4000);
+          bot.on('windowOpen', onOpen);
+          Promise.resolve(bot.activateBlock(chestBlock)).catch(err => {
+            if (settled) return;
+            settled = true;
+            if (timer) clearTimeout(timer);
+            bot.removeListener('windowOpen', onOpen);
+            reject(err);
+          });
+        });
+      } else {
+        let timer = null;
+        container = await Promise.race([
+          Promise.resolve(openFn(chestBlock)),
+          new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('timeout')), 4000); }),
+        ]).finally(() => { if (timer) clearTimeout(timer); });
+      }
       if (!container) return;
       for (const item of itemsToDump) {
         if (!valid(token, 'autoChestDump') || disposed) break;
@@ -346,18 +384,28 @@ function createAutomation(bot, options) {
           break;
         }
       }
+    } catch (err) {
+      if (err && err.message === 'timeout') {
+        timedOut = true;
+        if (!disposed && options.current() && config.autoChestDump?.enabled) {
+          report('autoChestDump', 'waiting', 'Sandık açılamadı (zaman aşımı).');
+        }
+        return;
+      }
+      throw err;
     } finally {
       try { container?.close?.(); } catch {}
     }
-    if (valid(token, 'autoChestDump')) report('autoChestDump', 'idle', undefined, true);
+    if (!timedOut && valid(token, 'autoChestDump')) report('autoChestDump', 'idle', undefined, true);
   }
 
   async function fish(token) {
     const cfg = config.autoFishing;
     const rod = bot.inventory.items().find(i => i.name === 'fishing_rod');
     if (!rod) { report('autoFishing', 'waiting', 'Olta bulunamadı.'); nextFish = Date.now() + 5000; return; }
-    const water = typeof bot.blockAtCursor === 'function' && bot.blockAtCursor(24, block => block.name === 'water' || block.boundingBox === 'block');
-    if (!water || water.name !== 'water') { report('autoFishing', 'waiting', 'Bakış yönünde su bulunamadı.'); nextFish = Date.now() + 5000; return; }
+    const isWater = block => block && (block.name === 'water' || block.name === 'flowing_water');
+    const water = typeof bot.blockAtCursor === 'function' && bot.blockAtCursor(24, block => isWater(block) || block.boundingBox === 'block');
+    if (!isWater(water)) { report('autoFishing', 'waiting', 'Bakış yönünde su bulunamadı.'); nextFish = Date.now() + 5000; return; }
     const held = snapshotHeld();
     report('autoFishing', 'running');
     await bot.equip(rod, 'hand');
@@ -366,6 +414,7 @@ function createAutomation(bot, options) {
     const cancelled = new Promise(resolve => { cancelActive = () => resolve('cancel'); });
     const timeout = new Promise(resolve => { timer = setTimeout(() => resolve('timeout'), cfg.timeoutSeconds * 1000); });
     const fishing = Promise.resolve(bot.fish()).then(() => 'caught');
+    fishing.catch(() => {});
     fishingCast = true;
     try {
       const result = await Promise.race([fishing, cancelled, timeout]);

@@ -4,6 +4,7 @@ import { useBotStore } from '../store/botStore';
 import BotList from '../components/BotList/Container.vue';
 import AppIcon from '../components/ui/AppIcon.vue';
 import { useI18n } from '../i18n';
+import { DEFAULT_VERSION } from '../utils/supportedVersions';
 
 const api = window.electronAPI;
 const store = useBotStore();
@@ -27,7 +28,7 @@ async function add() {
   saving.value = true;
   try {
     message.value = '';
-    await store.addBot({ username: username.value.trim(), host: 'localhost', port: 25565 });
+    await store.addBot({ username: username.value.trim(), host: 'localhost', port: 25565, version: DEFAULT_VERSION });
     username.value = '';
   } catch (error) {
     message.value = String(error);

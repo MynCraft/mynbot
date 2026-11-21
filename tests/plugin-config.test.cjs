@@ -93,8 +93,16 @@ const { buildSync } = require('esbuild');
     assert.equal(boundedNew.autoChestDump.intervalSeconds, 120);
     assert.deepEqual(boundedNew.autoChestDump.keepKeywords, ['diamond']);
     const file = path.join(dir, 'bots.json');
-    await fs.writeFile(file, JSON.stringify([{ username: 'ConfigTest', host: 'localhost', port: 25565, plugins: { autoChat: { enabled: true, joinMessage: 'hi' } } }]));
+    await fs.writeFile(file, JSON.stringify([
+      { username: 'ConfigTest', host: 'localhost', port: 25565, plugins: { autoChat: { enabled: true, joinMessage: 'hi' } } },
+      { username: 'LegacyVer', host: 'localhost', port: 25565, version: '1.16.5' },
+    ]));
     const repo = new BotRepository(file); await repo.load();
+    assert.equal(repo.find('ConfigTest').version, '1.21.1');
+    assert.equal(repo.find('LegacyVer').version, '1.21.1');
+    assert.throws(() => repo.add({ username: 'OtherVer', host: 'localhost', port: 25565, version: '1.16.5' }), /1\.21\.1/);
+    await repo.add({ username: 'OkVer', host: 'localhost', port: 25565, version: '1.21.1' });
+    assert.equal(repo.find('OkVer').version, '1.21.1');
     const config = repo.find('ConfigTest').plugins;
     config.autoEat.enabled = true; config.autoEat.hungerThreshold = 12;
     config.autoArmor.enabled = true; config.autoFishing.timeoutSeconds = 85;

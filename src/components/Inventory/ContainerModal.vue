@@ -57,7 +57,8 @@ const heldItem = computed(() => {
 const isAnvil = computed(() => {
   const win = props.data.openWindow;
   if (!win) return false;
-  return /anvil/i.test(win.type) || /örs/i.test(win.title) || win.containerSlotCount === 3;
+  if (/anvil/i.test(win.type)) return true;
+  return !win.type.trim() && /örs|anvil/i.test(win.title);
 });
 
 const anvilName = ref('');

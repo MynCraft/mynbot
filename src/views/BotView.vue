@@ -8,7 +8,7 @@ import type { InventoryAction, InventoryItem } from '../types/bot';
 import { useBotStore } from '../store/botStore';
 import { useI18n } from '../i18n';
 import { useMinecraftMusic, nextMusicTrack } from '../utils/minecraftMusic';
-import { SUPPORTED_VERSIONS } from '../utils/supportedVersions';
+import { DEFAULT_VERSION, SUPPORTED_VERSIONS, SUPPORTED_VERSION_SET } from '../utils/supportedVersions';
 
 const api = window.electronAPI;
 const props = defineProps<{ username: string }>();
@@ -51,7 +51,7 @@ const tab = ref<TabKey>('overview');
 
 const host = ref('');
 const port = ref(25565);
-const version = ref('');
+const version = ref<string>(DEFAULT_VERSION);
 const message = ref('');
 const chatOutput = ref<HTMLElement | null>(null);
 const followChat = ref(true);
@@ -129,7 +129,7 @@ const isModalOpen = computed(() => inventoryModalOpen.value || Boolean(data.valu
 
 async function closeInventoryModal() {
   inventoryModalOpen.value = false;
-  if (data.value.openWindow || data.value.cursor) {
+  if (status.value.state === 'connected' && (data.value.openWindow || data.value.cursor)) {
     try {
       await api.closeContainer(props.username);
     } catch (err) {
@@ -265,7 +265,7 @@ onMounted(async () => {
   if (bot.value) {
     host.value = bot.value.host;
     port.value = bot.value.port;
-    version.value = bot.value.version || '';
+    version.value = bot.value.version && SUPPORTED_VERSION_SET.has(bot.value.version) ? bot.value.version : DEFAULT_VERSION;
   }
 });
 
@@ -293,7 +293,21 @@ async function act(action: () => Promise<void>) {
 }
 
 async function save() {
-  await api.updateBot({ username: props.username, host: host.value.trim(), port: Number(port.value), version: version.value.trim() || undefined });
+  let cleanHost = host.value.trim();
+  let cleanPort = Number(port.value);
+  const hostPortMatch = /^(?:\[([^\]]+)\]|([^:\s]+)):(\d+)$/.exec(cleanHost);
+  if (hostPortMatch) {
+    const candidateHost = (hostPortMatch[1] || hostPortMatch[2] || '').trim();
+    const candidatePort = Number(hostPortMatch[3]);
+    if (candidateHost && Number.isInteger(candidatePort) && candidatePort >= 1 && candidatePort <= 65535) {
+      cleanHost = candidateHost;
+      cleanPort = candidatePort;
+      host.value = cleanHost;
+      port.value = cleanPort;
+    }
+  }
+  const selectedVersion = SUPPORTED_VERSION_SET.has(version.value.trim()) ? version.value.trim() : DEFAULT_VERSION;
+  await api.updateBot({ username: props.username, host: cleanHost, port: cleanPort, version: selectedVersion });
   await store.refresh();
 }
 
@@ -494,7 +508,7 @@ function logTone(line: string): 'log-error' | 'log-warn' | 'log-ok' | '' {
             </div>
             <div>
               <small>{{ L('MINECRAFT', 'MINECRAFT') }}</small>
-              <strong>{{ version.trim() || bot?.version || L('Otomatik', 'Auto') }} · Java</strong>
+              <strong>{{ version.trim() || bot?.version || DEFAULT_VERSION }} · Java</strong>
             </div>
           </div>
           <div class="dashboard-grid">
@@ -512,7 +526,6 @@ function logTone(line: string): 'log-error' | 'log-warn' | 'log-ok' | '' {
                   <div>
                     <label for="server-version">{{ L('Sürüm', 'Version') }}</label>
                     <select id="server-version" v-model="version">
-                      <option value="">{{ L('Otomatik', 'Auto') }}</option>
                       <option v-for="v in SUPPORTED_VERSIONS" :key="v" :value="v">{{ v }}</option>
                     </select>
                   </div>
